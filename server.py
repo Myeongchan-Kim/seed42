@@ -15,6 +15,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import threading
 from html.parser import HTMLParser
 
 import markdown as md
@@ -106,8 +107,12 @@ STR = {
     "seeking":  {"en": "Searching…", "ko": "찾는 중…", "zh": "查找中…",
                  "es": "Buscando…"},
     "dash":     {"en": "Dashboard", "ko": "대시보드", "zh": "仪表板", "es": "Panel"},
-    "toppath":  {"en": "Most searched paths", "ko": "인기 경로",
-                 "zh": "热门路径", "es": "Rutas más buscadas"},
+    "toppath":  {"en": "Most searched", "ko": "인기 경로",
+                 "zh": "热门路径", "es": "Más buscadas"},
+    "farthest": {"en": "Farthest apart", "ko": "가장 먼 경로",
+                 "zh": "距离最远", "es": "Más lejanas"},
+    "closest":  {"en": "Closest", "ko": "가장 가까운 경로",
+                 "zh": "距离最近", "es": "Más cercanas"},
     "livewords":{"en": "Live searches", "ko": "실시간 검색어",
                  "zh": "实时搜索", "es": "Búsquedas en vivo"},
     "livepairs":{"en": "Recent pairs", "ko": "최근 검색 쌍",
@@ -155,11 +160,12 @@ def respond_html(title: str, body: str, count: int, lang: str):
 GAME_JS = r"""
 const form = document.querySelector('form.pf');
 const out = document.getElementById('out');
-const chip = w => {
+const chip = (w, nxt) => {
   const a = document.createElement('a');
   a.className = 'hop';
   a.href = '/w/' + encodeURIComponent(w) + '?lang=' + L.lang;
   a.textContent = w;
+  if (nxt) { a.dataset.w = w; a.dataset.next = nxt; }
   return a;
 };
 const box = (cls, big, note, words, act) => {
@@ -180,6 +186,70 @@ const box = (cls, big, note, words, act) => {
   }
   return d;
 };
+// 홉에 마우스를 올리면 다음 단어가 본문 어디에서 나왔는지 보여준다.
+const tipEl = document.createElement('div');
+tipEl.className = 'tip'; tipEl.hidden = true;
+document.body.appendChild(tipEl);
+const cache = new Map();
+let tipFor = null;
+
+async function showTip(el) {
+  const a = el.dataset.w, b = el.dataset.next;
+  if (!a || !b) return;
+  tipFor = el;
+  const key = a + '\u0000' + b;
+  let d = cache.get(key);
+  if (!d) {
+    tipEl.textContent = L.seeking;
+    place(el);
+    try {
+      d = await (await fetch('/api/snippet?a=' + encodeURIComponent(a) +
+        '&b=' + encodeURIComponent(b))).json();
+    } catch { d = {ok: false}; }
+    cache.set(key, d);
+  }
+  if (tipFor !== el) return;                 // 그 사이 다른 칩으로 옮겼다
+  tipEl.textContent = '';
+  if (!d.ok) { tipEl.textContent = '—'; }
+  else {
+    const head = document.createElement('div');
+    head.className = 'tiphead'; head.textContent = a;
+    tipEl.appendChild(head);
+    const body = document.createElement('div');
+    body.append(d.before);
+    const m = document.createElement('mark'); m.textContent = d.match;
+    body.appendChild(m);
+    body.append(d.after);
+    tipEl.appendChild(body);
+  }
+  place(el);
+}
+
+function place(el) {
+  tipEl.hidden = false;
+  const r = el.getBoundingClientRect();
+  const w = Math.min(420, window.innerWidth - 24);
+  tipEl.style.width = w + 'px';
+  let left = r.left + r.width / 2 - w / 2;
+  left = Math.max(12, Math.min(left, window.innerWidth - w - 12));
+  tipEl.style.left = left + 'px';
+  const h = tipEl.offsetHeight;
+  const above = r.top > h + 16;
+  tipEl.style.top = (above ? r.top - h - 10 : r.bottom + 10) + window.scrollY + 'px';
+}
+
+function hideTip() { tipEl.hidden = true; tipFor = null; }
+
+function bindHops(root) {
+  root.querySelectorAll('a.hop[data-next]').forEach(el => {
+    el.addEventListener('mouseenter', () => showTip(el));
+    el.addEventListener('focus', () => showTip(el));
+    el.addEventListener('mouseleave', hideTip);
+    el.addEventListener('blur', hideTip);
+  });
+}
+bindHops(document);
+
 form.addEventListener('submit', async e => {
   const a = form.a.value.trim(), b = form.b.value.trim();
   if (!a || !b) return;                       // 빈 값이면 평소대로 제출
@@ -216,24 +286,39 @@ form.addEventListener('submit', async e => {
 
 # --------------------------------------------------------------------- 길찾기
 
-_G: dict = {"cfg": None, "adj": None, "rev": None, "edges": 0}
+_G: dict = {"cfg": None, "adj": None, "rev": None, "rowid": 0}
+_G_lock = threading.Lock()
 
 
 def graph_adj():
-    """인접 리스트를 메모리에 올려둔다. 요청마다 DB 에서 읽으면 7초가 걸려
-    게임이 안 된다. 엣지 수가 5% 넘게 늘면 다시 읽는다 (크롤이 계속 돌기 때문)."""
+    """인접 리스트를 메모리에 올려둔다. 요청마다 DB 에서 다 읽으면 7초라 게임이 안 된다.
+
+    갱신은 새로 들어온 엣지만 덧붙인다. 예전에는 '엣지가 5% 늘면 다시 읽기'였는데,
+    사용자가 클릭으로 만든 엣지 몇 개는 5%(7만 개)에 한참 못 미쳐 영원히 반영되지
+    않았다 - 직접 걸어서 만든 길을 길찾기가 못 찾았다.
+    MAX(rowid) 확인은 0ms, COUNT(*) 는 30ms 라 rowid 를 기준으로 쓴다."""
     c = conn()
     cfg = click_config()
-    n = c.execute("SELECT COUNT(*) x FROM edge WHERE config_id=?", (cfg,)).fetchone()["x"]
-    if _G["adj"] is not None and _G["cfg"] == cfg and n < _G["edges"] * 1.05:
+    top = c.execute("SELECT MAX(rowid) x FROM edge").fetchone()["x"] or 0
+    with _G_lock:
+        if _G["adj"] is None or _G["cfg"] != cfg:
+            adj: dict[int, list[int]] = {}
+            rev: dict[int, list[int]] = {}
+            rows = c.execute("SELECT src_id, dst_id FROM edge WHERE config_id=?", (cfg,))
+            for a, b in rows:
+                adj.setdefault(a, []).append(b)
+                rev.setdefault(b, []).append(a)
+            _G.update(cfg=cfg, adj=adj, rev=rev, rowid=top)
+        elif top > _G["rowid"]:                     # 새로 생긴 것만 덧붙인다
+            adj, rev = _G["adj"], _G["rev"]
+            rows = c.execute(
+                "SELECT src_id, dst_id FROM edge WHERE config_id=? AND rowid>?",
+                (cfg, _G["rowid"]))
+            for a, b in rows:
+                adj.setdefault(a, []).append(b)
+                rev.setdefault(b, []).append(a)
+            _G["rowid"] = top
         return _G["adj"], _G["rev"]
-    adj: dict[int, list[int]] = {}
-    rev: dict[int, list[int]] = {}
-    for a, b in c.execute("SELECT src_id, dst_id FROM edge WHERE config_id=?", (cfg,)):
-        adj.setdefault(a, []).append(b)
-        rev.setdefault(b, []).append(a)
-    _G.update(cfg=cfg, adj=adj, rev=rev, edges=n)
-    return adj, rev
 
 
 def shortest(adj, rev, src: int, dst: int, cap: int = 300_000):
@@ -398,12 +483,24 @@ ul.rows li a:hover{color:var(--accent)}
 .pill{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:99px;
 background:var(--accent-soft);color:var(--accent);white-space:nowrap}
 .pill.warn{background:var(--raised);color:var(--faint)}
+.pill.big{font-size:13px;padding:3px 11px;font-weight:500}
+ul.rows.far li{padding:10px 0}
+ul.rows.far li a{font-size:15px}
 .cnt{font-family:var(--mono);font-size:11px;color:var(--faint);min-width:20px;
 text-align:right;font-variant-numeric:tabular-nums}
 .tags{display:flex;flex-wrap:wrap;gap:5px}
 .tags a{font-size:13px;padding:4px 10px;border:1px solid var(--rule);border-radius:99px;
 color:var(--ink);text-decoration:none;background:var(--surface)}
 .tags a:hover{border-color:var(--accent);color:var(--accent)}
+.tip{position:absolute;z-index:50;background:var(--surface);border:1px solid var(--rule);
+border-radius:8px;padding:12px 14px;font-size:13px;line-height:1.65;color:var(--ink);
+box-shadow:0 6px 24px rgba(0,0,0,.13);pointer-events:none;white-space:pre-wrap;
+word-break:break-word;max-height:220px;overflow:hidden}
+.tiphead{font-family:var(--mono);font-size:11px;color:var(--faint);
+margin-bottom:6px;letter-spacing:.04em}
+.tip mark{background:var(--accent-soft);color:var(--accent);font-weight:600;
+padding:1px 3px;border-radius:3px}
+a.hop[data-next]{cursor:help}
 .box.seeking{border-style:dashed;color:var(--muted)}
 .box.seeking .big{color:var(--muted);font-size:19px}
 .more{margin:18px 0 0}
@@ -528,6 +625,14 @@ def index():
     top = q("""SELECT a, b, COUNT(*) c, MIN(hops) h FROM search_log
                WHERE kind='path' AND status='ok'
                GROUP BY lower(a), lower(b) ORDER BY c DESC, h ASC LIMIT 10""")
+    # 가장 멀리 떨어진 쌍. 인기는 '무엇이 궁금했나'지만 거리는 '그래프가 어떻게
+    # 생겼나'라서, 니치한 대상이나 언어를 건너는 경로가 여기 올라온다.
+    far = q("""SELECT a, b, MIN(hops) h FROM search_log
+               WHERE kind='path' AND status='ok'
+               GROUP BY lower(a), lower(b) ORDER BY h DESC LIMIT 10""")
+    near = q("""SELECT a, b, MIN(hops) h FROM search_log
+                WHERE kind='path' AND status='ok' AND hops > 0
+                GROUP BY lower(a), lower(b) ORDER BY h ASC LIMIT 6""")
     # 아직 이어지지 않은 쌍 — 도와줄 거리
     open_pairs = q("""SELECT a, b, COUNT(*) c FROM search_log
                       WHERE kind='path' AND status<>'ok'
@@ -544,6 +649,14 @@ def index():
                 f'{html.escape(r["a"])} <span class="arr">→</span> '
                 f'{html.escape(r["b"])}</a>{badge}'
                 f'<span class="cnt">{r["c"]}</span></li>')
+
+    def hoprow(r, big=False):
+        cls = "pill big" if big else "pill"
+        link = url_for("find_path", a=r["a"], b=r["b"], lang=lang)
+        return (f'<li><a href="{html.escape(link)}">'
+                f'{html.escape(r["a"])} <span class="arr">→</span> '
+                f'{html.escape(r["b"])}</a>'
+                f'<span class="{cls}">{r["h"]} {T(lang, "hops")}</span></li>')
 
     def openrow(r):
         link = url_for("find_path", a=r["a"], b=r["b"], lang=lang)
@@ -577,12 +690,16 @@ def index():
       </div>
       <div class="cols">
         <section>
-          <p class="lbl">{T(lang, "toppath")}</p>
-          <ul class="rows">{"".join(pathrow(r) for r in top) or empty}</ul>
-          {'<p class="lbl">' + T(lang, "nolink").split("—")[0].strip() + '</p><ul class="rows">'
-           + "".join(openrow(r) for r in open_pairs) + '</ul>' if open_pairs else ''}
+          <p class="lbl">{T(lang, "farthest")}</p>
+          <ul class="rows far">{"".join(hoprow(r, True) for r in far) or empty}</ul>
+          {'<p class="lbl">' + T(lang, "closest") + '</p><ul class="rows">'
+           + "".join(hoprow(r) for r in near) + '</ul>' if near else ''}
         </section>
         <section>
+          {'<p class="lbl">' + T(lang, "nolink").split("—")[0].strip() + '</p><ul class="rows">'
+           + "".join(openrow(r) for r in open_pairs) + '</ul>' if open_pairs else ''}
+          <p class="lbl">{T(lang, "toppath")}</p>
+          <ul class="rows">{"".join(pathrow(r) for r in top) or empty}</ul>
           <p class="lbl">{T(lang, "livepairs")}</p>
           <ul class="rows">{"".join(liverow(r) for r in live_pairs) or empty}</ul>
           <p class="lbl">{T(lang, "livewords")}</p>
@@ -658,8 +775,9 @@ def find_path():
                                        (llm.GEN_MODEL,)).fetchone()["n"], lang)
 
 
-def _chip(word: str, lang: str) -> str:
-    return (f'<a class="hop" href="{url_for("word", w=word, lang=lang)}">'
+def _chip(word: str, lang: str, nxt: str | None = None) -> str:
+    data = f' data-w="{html.escape(word)}" data-next="{html.escape(nxt)}"' if nxt else ""
+    return (f'<a class="hop"{data} href="{url_for("word", w=word, lang=lang)}">'
             f'{html.escape(word)}</a>')
 
 
@@ -688,8 +806,10 @@ def solve_logged(a: str, b: str, lang: str) -> dict:
 def _result(a: str, b: str, lang: str) -> str:
     r = solve_logged(a, b, lang)
     if r["status"] == "ok":
+        p_ = r["path"]
         chain = '<span class="arr">→</span>'.join(
-            _chip(w, lang) for w in r["path"])
+            _chip(w, lang, p_[i + 1] if i + 1 < len(p_) else None)
+            for i, w in enumerate(p_))
         return (f'<div class="box ok"><p class="big">{r["hops"]} {T(lang, "hops")}</p>'
                 f'<div class="chain">{chain}</div></div>')
     key = "unseen" if r["status"] == "unseen" else "nolink"
@@ -701,6 +821,39 @@ def _result(a: str, b: str, lang: str) -> str:
     return (f'<div class="{cls}"><p class="big">{T(lang, key)}</p>'
             f'<p class="note">{T(lang, "nohelp")}</p>'
             f'<div class="ctas">{links}</div></div>')
+
+
+@app.get("/api/snippet")
+def api_snippet():
+    """a 의 응답에서 b 가 나온 대목을 잘라 준다. 경로의 각 홉이 실제 본문
+    어디에서 왔는지 보여주기 위한 것 - 경로가 진짜인지 눈으로 확인할 수 있다."""
+    from flask import jsonify
+    a = (request.args.get("a") or "").strip()
+    b = (request.args.get("b") or "").strip()
+    if not a or not b:
+        return jsonify({"ok": False}), 400
+    r = conn().execute(
+        "SELECT r.text FROM response r JOIN node n ON n.id=r.node_id"
+        " WHERE lower(n.word)=lower(?) AND r.gen_model=? LIMIT 1",
+        (a, llm.GEN_MODEL)).fetchone()
+    if not r:
+        return jsonify({"ok": False})
+    text = r["text"]
+    hit = next((sp for sp in tokens.spans(text) if sp[2].lower() == b.lower()), None)
+    if hit is None:                      # 표제어가 아닌 표기로 등장했을 수 있다
+        i = text.lower().find(b.lower())
+        if i < 0:
+            return jsonify({"ok": False})
+        hit = (i, i + len(b), b)
+    st, en, _ = hit
+    pad = 140
+    lo, hi = max(0, st - pad), min(len(text), en + pad)
+    return jsonify({
+        "ok": True,
+        "before": ("…" if lo else "") + text[lo:st],
+        "match": text[st:en],
+        "after": text[en:hi] + ("…" if hi < len(text) else ""),
+    })
 
 
 @app.get("/api/path")
@@ -767,7 +920,6 @@ def word(w: str):
 
 
 if __name__ == "__main__":
-    import threading
     # 첫 요청이 2초 걸리는 것을 없앤다. 백그라운드로 미리 올린다.
     threading.Thread(target=lambda: graph_adj(), daemon=True).start()
     app.run(host="127.0.0.1", port=5001, debug=False, threaded=True)

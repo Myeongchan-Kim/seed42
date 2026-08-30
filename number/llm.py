@@ -47,7 +47,8 @@ EMBED_MODEL = PROVIDERS[PROVIDER]["embed"]
 # 파이프라인 버전. 프롬프트든 토크나이저든 바뀌면 그래프가 달라지므로 올린다.
 #   v3: 정규식으로 조사를 떼던 한국어 전용 토크나이저
 #   v4: 언어별 형태소 분석기 (ko=kiwipiepy, zh=jieba, ja/es/en=spaCy)
-PROMPT_VERSION = "v4"
+#   v5: 한국어 한자(SH 태그) 포함. v4 는 한국어 응답의 41% 에 든 한자를 버렸다
+PROMPT_VERSION = "v5"
 
 
 class CacheMiss(RuntimeError):

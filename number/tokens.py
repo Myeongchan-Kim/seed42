@@ -86,8 +86,11 @@ def spans(text: str, lang: str | None = None) -> list[tuple[int, int, str]]:
     out: list[tuple[int, int, str]] = []
 
     if lang == "ko":
+        # SH(한자)를 빼면 한국어 본문의 한자 표기가 통째로 사라진다.
+        # '산소' 응답의 酸素·山所·省墓 가 전부 버려지고 있었다. 한국어→한자
+        # 다리를 측정 도구가 지우면 언어 간 비대칭이 실제보다 낮게 나온다.
         for t in nlp.tokenize(text):
-            if t.tag in ("NNG", "NNP", "SL") and len(t.form) >= 2:
+            if t.tag in ("NNG", "NNP", "SL", "SH") and len(t.form) >= 2:
                 out.append((t.start, t.start + t.len, t.form))
     elif lang == "zh":
         pos = 0
