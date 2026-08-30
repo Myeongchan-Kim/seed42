@@ -17,3 +17,5 @@ viewer.html
 .venv/
 __pycache__/
 *.pyc
+logs/
+.daily_*.txt

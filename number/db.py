@@ -137,6 +137,20 @@ CREATE TABLE IF NOT EXISTS search_log (
 CREATE INDEX IF NOT EXISTS ix_log_kind ON search_log(kind, id);
 CREATE INDEX IF NOT EXISTS ix_log_pair ON search_log(a, b);
 
+-- 두 단어 사이 최단 기록. BFS 는 늘 현재 그래프의 최단을 주므로, 기록이 깨지는 것은
+-- 그래프가 자랐다는 뜻이다 (누군가 클릭으로 엣지를 만들었다). 그래서 이것은
+-- "이 거리를 누가 처음 달성했나" 의 기록이다.
+CREATE TABLE IF NOT EXISTS record (
+  pair       TEXT PRIMARY KEY,      -- norm(a) 와 norm(b) 를 NUL 로 이은 키
+  a          TEXT NOT NULL,
+  b          TEXT NOT NULL,
+  hops       INTEGER NOT NULL,
+  path       TEXT NOT NULL,         -- JSON
+  finder     TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_record_time ON record(created_at DESC);
+
 -- 임베딩은 숫자 색인이라 원장에 JSON 으로 넣으면 비대해진다. float32 BLOB 으로 따로.
 CREATE TABLE IF NOT EXISTS embedding (
   model TEXT NOT NULL,
@@ -227,7 +241,7 @@ def _upgrade(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # SQLite 는 동시 writer 를 못 견딘다. 모든 쓰기를 하나의 락으로 직렬화한다.
 #
@@ -434,3 +448,21 @@ def log_search(conn, kind: str, a: str, b: str | None = None,
 
 
 log_search = _serialized(log_search)
+
+
+def get_record(conn, pair: str):
+    return conn.execute("SELECT * FROM record WHERE pair=?", (pair,)).fetchone()
+
+
+def put_record(conn, pair: str, a: str, b: str, hops: int, path_json: str,
+               finder: str | None) -> None:
+    conn.execute(
+        "INSERT INTO record (pair, a, b, hops, path, finder, created_at)"
+        " VALUES (?,?,?,?,?,?,?)"
+        " ON CONFLICT(pair) DO UPDATE SET hops=excluded.hops, path=excluded.path,"
+        " finder=excluded.finder, created_at=excluded.created_at,"
+        " a=excluded.a, b=excluded.b",
+        (pair, a, b, hops, path_json, finder, now()))
+
+
+put_record = _serialized(put_record)

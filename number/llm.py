@@ -48,7 +48,11 @@ EMBED_MODEL = PROVIDERS[PROVIDER]["embed"]
 #   v3: 정규식으로 조사를 떼던 한국어 전용 토크나이저
 #   v4: 언어별 형태소 분석기 (ko=kiwipiepy, zh=jieba, ja/es/en=spaCy)
 #   v5: 한국어 한자(SH 태그) 포함. v4 는 한국어 응답의 41% 에 든 한자를 버렸다
-PROMPT_VERSION = "v5"
+#   v6: 한 글자 한국어 명사 포함 (질·뇌·폐·간·물·빛). len>=2 로 자르면 사라졌다.
+#       의존명사는 목록이 아니라 kiwi 의 NNB 태그로 거른다.
+#   v7: 영어·스페인어 복합명사 (black hole, citric acid cycle). v6 은 'hole' 만
+#       남겨 '중력 -> 구멍' 같은 가짜 엣지를 만들었다.
+PROMPT_VERSION = "v7"
 
 
 class CacheMiss(RuntimeError):

@@ -14,21 +14,28 @@ from __future__ import annotations
 
 import html
 import json
+import random
 import re
 import threading
+import urllib.parse as U
 from html.parser import HTMLParser
+from pathlib import Path
 
 import markdown as md
+from dotenv import dotenv_values
 from flask import Flask, redirect, request, url_for
 
-from number import db, llm
-from number.tokens import norm
+from number import db, llm, tokens
+from number.tokens import clean, is_word, norm
 
 app = Flask(__name__)
-CLICK_K = 0  # 클릭 탐색 = K 없음
 
-from number import tokens
-from number.tokens import clean, is_word
+CLICK_K = 0  # 클릭 탐색 = K 없음
+ROOT_ENV = Path(__file__).resolve().parent / ".env"
+
+# 공유 링크에 쓸 공개 주소. 없으면 공유 버튼을 숨긴다 -
+# 127.0.0.1 링크는 남에게 보내봐야 열리지 않는다.
+PUBLIC_URL = (dotenv_values(ROOT_ENV).get("PUBLIC_URL") or "").rstrip("/")
 
 
 def clickable(token: str) -> bool:
@@ -106,6 +113,28 @@ STR = {
     "explore":  {"en": "Explore", "ko": "탐색하기", "zh": "探索", "es": "Explorar"},
     "seeking":  {"en": "Searching…", "ko": "찾는 중…", "zh": "查找中…",
                  "es": "Buscando…"},
+    "share":    {"en": "Share", "ko": "공유", "zh": "分享", "es": "Compartir"},
+    "copied":   {"en": "Link copied", "ko": "링크 복사됨", "zh": "链接已复制",
+                 "es": "Enlace copiado"},
+    "copylink": {"en": "Copy link", "ko": "링크 복사", "zh": "复制链接",
+                 "es": "Copiar enlace"},
+    "newrec":   {"en": "New record! Leave your name",
+                 "ko": "신기록! 이름을 남겨주세요",
+                 "zh": "新纪录！留下你的名字", "es": "¡Nuevo récord! Deja tu nombre"},
+    "save":     {"en": "Save", "ko": "저장", "zh": "保存", "es": "Guardar"},
+    "held":     {"en": "record by", "ko": "기록 보유", "zh": "纪录保持",
+                 "es": "récord de"},
+    "records":  {"en": "Records", "ko": "기록", "zh": "纪录", "es": "Récords"},
+    "top1":     {"en": "Top 1% — almost nothing is this far apart!",
+                 "ko": "상위 1% — 이만큼 먼 쌍은 거의 없습니다!",
+                 "zh": "前 1% — 几乎没有这么远的词对！",
+                 "es": "Top 1% — ¡casi nada está tan lejos!"},
+    "top5":     {"en": "Top 5% farthest", "ko": "상위 5% 먼 거리",
+                 "zh": "最远的前 5%", "es": "Top 5% más lejanas"},
+    "top10":    {"en": "Top 10% farthest", "ko": "상위 10% 먼 거리",
+                 "zh": "最远的前 10%", "es": "Top 10% más lejanas"},
+    "typical":  {"en": "About average", "ko": "평범한 거리",
+                 "zh": "普通距离", "es": "Distancia típica"},
     "dash":     {"en": "Dashboard", "ko": "대시보드", "zh": "仪表板", "es": "Panel"},
     "toppath":  {"en": "Most searched", "ko": "인기 경로",
                  "zh": "热门路径", "es": "Más buscadas"},
@@ -160,33 +189,8 @@ def respond_html(title: str, body: str, count: int, lang: str):
 GAME_JS = r"""
 const form = document.querySelector('form.pf');
 const out = document.getElementById('out');
-const chip = (w, nxt) => {
-  const a = document.createElement('a');
-  a.className = 'hop';
-  a.href = '/w/' + encodeURIComponent(w) + '?lang=' + L.lang;
-  a.textContent = w;
-  if (nxt) { a.dataset.w = w; a.dataset.next = nxt; }
-  return a;
-};
-const box = (cls, big, note, words, act) => {
-  const d = document.createElement('div'); d.className = cls;
-  const h = document.createElement('p'); h.className = 'big'; h.textContent = big;
-  d.appendChild(h);
-  if (note) { const n = document.createElement('p'); n.className = 'note';
-              n.textContent = note; d.appendChild(n); }
-  if (words) {
-    const c = document.createElement('div'); c.className = 'ctas';
-    for (const w of words) {
-      const a = document.createElement('a'); a.className = 'cta';
-      a.href = '/w/' + encodeURIComponent(w) + '?lang=' + L.lang;
-      a.textContent = w + ' — ' + act;
-      c.appendChild(a);
-    }
-    d.appendChild(c);
-  }
-  return d;
-};
-// 홉에 마우스를 올리면 다음 단어가 본문 어디에서 나왔는지 보여준다.
+
+// 경로의 홉에 마우스를 올리면 다음 단어가 본문 어디에서 나왔는지 보여준다.
 const tipEl = document.createElement('div');
 tipEl.className = 'tip'; tipEl.hidden = true;
 document.body.appendChild(tipEl);
@@ -197,89 +201,87 @@ async function showTip(el) {
   const a = el.dataset.w, b = el.dataset.next;
   if (!a || !b) return;
   tipFor = el;
-  const key = a + '\u0000' + b;
+  const key = a + '|' + b;
   let d = cache.get(key);
   if (!d) {
-    tipEl.textContent = L.seeking;
-    place(el);
+    tipEl.textContent = L.seeking; place(el);
     try {
       d = await (await fetch('/api/snippet?a=' + encodeURIComponent(a) +
         '&b=' + encodeURIComponent(b))).json();
     } catch { d = {ok: false}; }
     cache.set(key, d);
   }
-  if (tipFor !== el) return;                 // 그 사이 다른 칩으로 옮겼다
+  if (tipFor !== el) return;
   tipEl.textContent = '';
-  if (!d.ok) { tipEl.textContent = '—'; }
+  if (!d.ok) { tipEl.textContent = '\u2014'; }
   else {
-    const head = document.createElement('div');
-    head.className = 'tiphead'; head.textContent = a;
-    tipEl.appendChild(head);
+    const h = document.createElement('div');
+    h.className = 'tiphead'; h.textContent = a; tipEl.appendChild(h);
     const body = document.createElement('div');
     body.append(d.before);
     const m = document.createElement('mark'); m.textContent = d.match;
-    body.appendChild(m);
-    body.append(d.after);
+    body.appendChild(m); body.append(d.after);
     tipEl.appendChild(body);
   }
   place(el);
 }
-
 function place(el) {
   tipEl.hidden = false;
   const r = el.getBoundingClientRect();
   const w = Math.min(420, window.innerWidth - 24);
   tipEl.style.width = w + 'px';
-  let left = r.left + r.width / 2 - w / 2;
-  left = Math.max(12, Math.min(left, window.innerWidth - w - 12));
+  let left = Math.max(12, Math.min(r.left + r.width / 2 - w / 2,
+                                   window.innerWidth - w - 12));
   tipEl.style.left = left + 'px';
-  const h = tipEl.offsetHeight;
-  const above = r.top > h + 16;
+  const h = tipEl.offsetHeight, above = r.top > h + 16;
   tipEl.style.top = (above ? r.top - h - 10 : r.bottom + 10) + window.scrollY + 'px';
 }
-
 function hideTip() { tipEl.hidden = true; tipFor = null; }
 
-function bindHops(root) {
+function bind(root) {
   root.querySelectorAll('a.hop[data-next]').forEach(el => {
     el.addEventListener('mouseenter', () => showTip(el));
     el.addEventListener('focus', () => showTip(el));
     el.addEventListener('mouseleave', hideTip);
     el.addEventListener('blur', hideTip);
   });
+  const rec = root.querySelector('#recform');
+  if (rec) rec.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = rec.querySelector('button'); btn.disabled = true;
+    const res = await (await fetch('/api/record', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({a: rec.dataset.a, b: rec.dataset.b,
+                            name: rec.name.value})
+    })).json();
+    rec.textContent = res.ok
+      ? L.held + ' ' + (res.name || '—') + ' · ' + res.hops + ' ' + L.hops
+      : L.held + ' ' + (res.holder || '—');
+  });
+  const more = root.querySelector('#shmore');
+  if (more) more.addEventListener('click', async () => {
+    const url = more.dataset.url, text = more.dataset.text;
+    if (navigator.share) { try { await navigator.share({title: 'Seed 42', text, url}); return; } catch {} }
+    try { await navigator.clipboard.writeText(url); more.textContent = L.copied; } catch {}
+  });
 }
-bindHops(document);
+bind(document);
 
 form.addEventListener('submit', async e => {
   const a = form.a.value.trim(), b = form.b.value.trim();
-  if (!a || !b) return;                       // 빈 값이면 평소대로 제출
+  if (!a || !b) return;
   e.preventDefault();
-  out.textContent = '';
-  out.appendChild(box('box seeking', L.seeking));
+  out.innerHTML = '<div class="box seeking"><p class="big">' + L.seeking + '</p></div>';
   history.replaceState(null, '', '/path?a=' + encodeURIComponent(a) +
     '&b=' + encodeURIComponent(b) + '&lang=' + L.lang);
-  let r;
   try {
-    r = await (await fetch('/api/path?a=' + encodeURIComponent(a) +
+    const r = await (await fetch('/api/path?a=' + encodeURIComponent(a) +
       '&b=' + encodeURIComponent(b))).json();
-  } catch (err) { out.textContent = ''; out.appendChild(box('box warn', String(err)));
-                  return; }
-  out.textContent = '';
-  if (r.status === 'ok') {
-    const d = box('box ok', r.hops + ' ' + L.hops);
-    const c = document.createElement('div'); c.className = 'chain';
-    r.path.forEach((w, i) => {
-      if (i) { const s = document.createElement('span'); s.className = 'arr';
-               s.textContent = '\u2192'; c.appendChild(s); }
-      c.appendChild(chip(w));
-    });
-    d.appendChild(c); out.appendChild(d);
-  } else {
-    const unseen = r.status === 'unseen';
-    out.appendChild(box(unseen ? 'box' : 'box warn',
-      unseen ? L.unseen : L.nolink, L.nohelp, r.missing,
-      unseen ? L.throwit : L.explore));
+    out.innerHTML = r.html || '';
+  } catch (err) {
+    out.innerHTML = '<div class="box warn"><p class="big">' + err + '</p></div>';
   }
+  bind(out);
 });
 """
 
@@ -364,6 +366,38 @@ def _join(fp, bp, u, v):
         right.append(k)
         k = bp[k]
     return left[::-1] + right
+
+
+_DIST: dict = {"rowid": -1, "vals": []}
+
+
+def hop_distribution(n: int = 500) -> list[int]:
+    """무작위 쌍의 홉 분포. 백분위를 진짜 수치로 말하기 위한 것.
+    그래프가 자라면 분포가 변하므로 하드코딩하지 않고 다시 잰다 (600쌍에 1초)."""
+    adj, rev = graph_adj()
+    if _DIST["rowid"] == _G["rowid"] and _DIST["vals"]:
+        return _DIST["vals"]
+    pool = list(adj.keys())
+    if len(pool) < 50:
+        return []
+    rng = random.Random(42)
+    vals = []
+    for _ in range(n):
+        a, b = rng.sample(pool, 2)
+        p_ = shortest(adj, rev, a, b, cap=60_000)
+        if p_:
+            vals.append(len(p_) - 1)
+    vals.sort()
+    _DIST.update(rowid=_G["rowid"], vals=vals)
+    return vals
+
+
+def rarity(hops: int) -> float | None:
+    """이 거리보다 먼 무작위 쌍의 비율. 0.01 이면 상위 1%."""
+    vals = hop_distribution()
+    if not vals:
+        return None
+    return sum(1 for v in vals if v >= hops) / len(vals)
 
 
 def node_of(word: str):
@@ -492,6 +526,23 @@ text-align:right;font-variant-numeric:tabular-nums}
 .tags a{font-size:13px;padding:4px 10px;border:1px solid var(--rule);border-radius:99px;
 color:var(--ink);text-decoration:none;background:var(--surface)}
 .tags a:hover{border-color:var(--accent);color:var(--accent)}
+.tier{margin-left:12px;font-size:12px;padding:3px 10px;border-radius:99px;
+background:var(--accent-soft);color:var(--accent);vertical-align:middle;
+font-family:var(--sans);font-weight:500;letter-spacing:0}
+.tier.top1{background:#f6e4b8;color:#7a5200}
+.sharebar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:16px;
+padding-top:14px;border-top:1px solid var(--rule)}
+.shlbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+a.sh,button.sh{font:inherit;font-size:12px;padding:6px 13px;border:1px solid var(--rule);
+border-radius:99px;background:var(--surface);color:var(--muted);text-decoration:none;
+cursor:pointer}
+a.sh:hover,button.sh:hover{border-color:var(--accent);color:var(--accent)}
+form.rec{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px;
+font-size:13px}
+form.rec input{font:inherit;font-size:13px;padding:6px 11px;border:1px solid var(--rule);
+border-radius:6px;background:var(--ground);color:var(--ink);width:150px}
+form.rec button{font:inherit;font-size:13px;padding:6px 14px;border:1px solid var(--accent);
+background:var(--accent);color:var(--ground);border-radius:6px;cursor:pointer}
 .tip{position:absolute;z-index:50;background:var(--surface);border:1px solid var(--rule);
 border-radius:8px;padding:12px 14px;font-size:13px;line-height:1.65;color:var(--ink);
 box-shadow:0 6px 24px rgba(0,0,0,.13);pointer-events:none;white-space:pre-wrap;
@@ -627,9 +678,12 @@ def index():
                GROUP BY lower(a), lower(b) ORDER BY c DESC, h ASC LIMIT 10""")
     # 가장 멀리 떨어진 쌍. 인기는 '무엇이 궁금했나'지만 거리는 '그래프가 어떻게
     # 생겼나'라서, 니치한 대상이나 언어를 건너는 경로가 여기 올라온다.
+    # 상위 20 중 무작위 5개. 전부 보여주면 매번 같은 목록이라 다시 볼 이유가 없다.
     far = q("""SELECT a, b, MIN(hops) h FROM search_log
                WHERE kind='path' AND status='ok'
-               GROUP BY lower(a), lower(b) ORDER BY h DESC LIMIT 10""")
+               GROUP BY lower(a), lower(b) ORDER BY h DESC LIMIT 20""")
+    far = random.sample(far, min(5, len(far)))
+    far.sort(key=lambda r: -r["h"])
     near = q("""SELECT a, b, MIN(hops) h FROM search_log
                 WHERE kind='path' AND status='ok' AND hops > 0
                 GROUP BY lower(a), lower(b) ORDER BY h ASC LIMIT 6""")
@@ -794,7 +848,14 @@ def solve(a: str, b: str, lang: str | None = None) -> dict:
     c = conn()
     words = [c.execute("SELECT word FROM node WHERE id=?", (i,)).fetchone()["word"]
              for i in p]
-    return {"status": "ok", "hops": len(p) - 1, "path": words}
+    hops = len(p) - 1
+    key = norm(a) + "\x00" + norm(b)
+    prev = db.get_record(conn(), key)
+    record = prev is None or hops < prev["hops"]
+    return {"status": "ok", "hops": hops, "path": words,
+            "rarity": rarity(hops), "record": record,
+            "prev": prev["hops"] if prev else None,
+            "holder": prev["finder"] if prev else None}
 
 
 def solve_logged(a: str, b: str, lang: str) -> dict:
@@ -803,15 +864,61 @@ def solve_logged(a: str, b: str, lang: str) -> dict:
     return r
 
 
+def tier_key(rar: float | None) -> str | None:
+    if rar is None:
+        return None
+    return ("top1" if rar <= 0.01 else "top5" if rar <= 0.05
+            else "top10" if rar <= 0.10 else "typical")
+
+
+def share_bar(a: str, b: str, hops: int, lang: str) -> str:
+    """X·Facebook·LinkedIn 은 웹 인텐트가 있다. 인스타그램은 링크 공유용 웹
+    엔드포인트가 없어서 (모바일의 Web Share API 나) 링크 복사로 처리한다."""
+    if not PUBLIC_URL:
+        return ""
+    link = f"{PUBLIC_URL}/path?a={U.quote(a)}&b={U.quote(b)}"
+    txt = f"{a} → {b} : {hops} {T(lang, 'hops')} — Seed 42"
+    e_l, e_t = U.quote(link, safe=""), U.quote(txt, safe="")
+    outs = [
+        ("X", f"https://twitter.com/intent/tweet?text={e_t}&url={e_l}"),
+        ("Facebook", f"https://www.facebook.com/sharer/sharer.php?u={e_l}"),
+        ("LinkedIn", f"https://www.linkedin.com/sharing/share-offsite/?url={e_l}"),
+    ]
+    btns = "".join(f'<a class="sh" target="_blank" rel="noopener" '
+                   f'href="{html.escape(u)}">{n}</a>' for n, u in outs)
+    return (f'<div class="sharebar"><span class="shlbl">{T(lang, "share")}</span>{btns}'
+            f'<button class="sh" type="button" id="shmore" '
+            f'data-url="{html.escape(link)}" data-text="{html.escape(txt)}">'
+            f'Instagram · {T(lang, "copylink")}</button></div>')
+
+
 def _result(a: str, b: str, lang: str) -> str:
-    r = solve_logged(a, b, lang)
+    return _render(solve_logged(a, b, lang), a, b, lang)
+
+
+def _render(r: dict, a: str, b: str, lang: str) -> str:
     if r["status"] == "ok":
         p_ = r["path"]
         chain = '<span class="arr">→</span>'.join(
             _chip(w, lang, p_[i + 1] if i + 1 < len(p_) else None)
             for i, w in enumerate(p_))
-        return (f'<div class="box ok"><p class="big">{r["hops"]} {T(lang, "hops")}</p>'
-                f'<div class="chain">{chain}</div></div>')
+        tk = tier_key(r.get("rarity"))
+        badge = (f'<span class="tier {tk}">{T(lang, tk)}</span>'
+                 if tk and tk != "typical" else "")
+        rec = ""
+        if r.get("record"):
+            rec = (f'<form class="rec" id="recform" data-a="{html.escape(a)}" '
+                   f'data-b="{html.escape(b)}">'
+                   f'<span>{T(lang, "newrec")}</span>'
+                   f'<input name="name" maxlength="24" placeholder="name">'
+                   f'<button type="submit">{T(lang, "save")}</button></form>')
+        elif r.get("holder"):
+            rec = (f'<p class="note">{T(lang, "held")} '
+                   f'<b>{html.escape(r["holder"])}</b> · {r["prev"]} {T(lang, "hops")}</p>')
+        return (f'<div class="box ok"><p class="big">{r["hops"]} {T(lang, "hops")}'
+                f'{badge}</p>'
+                f'<div class="chain">{chain}</div>{rec}'
+                f'{share_bar(a, b, r["hops"], lang)}</div>')
     key = "unseen" if r["status"] == "unseen" else "nolink"
     act = "throwit" if r["status"] == "unseen" else "explore"
     links = " ".join(
@@ -856,6 +963,27 @@ def api_snippet():
     })
 
 
+@app.post("/api/record")
+def api_record():
+    """더 짧은 경로를 찾은 사람의 이름을 남긴다. 서버에서 다시 풀어 확인한다 -
+    클라이언트가 보낸 홉 수를 그대로 믿으면 아무 숫자나 넣을 수 있다."""
+    from flask import jsonify
+    d = request.get_json(silent=True) or {}
+    a, b = (d.get("a") or "").strip(), (d.get("b") or "").strip()
+    who = (d.get("name") or "").strip()[:24] or None
+    if not a or not b:
+        return jsonify({"ok": False}), 400
+    r = solve(a, b)
+    if r["status"] != "ok":
+        return jsonify({"ok": False})
+    key = norm(a) + "\x00" + norm(b)
+    prev = db.get_record(conn(), key)
+    if prev and r["hops"] >= prev["hops"]:
+        return jsonify({"ok": False, "hops": prev["hops"], "holder": prev["finder"]})
+    db.put_record(conn(), key, a, b, r["hops"], json.dumps(r["path"], ensure_ascii=False), who)
+    return jsonify({"ok": True, "hops": r["hops"], "name": who})
+
+
 @app.get("/api/path")
 def api_path():
     from flask import jsonify
@@ -863,7 +991,11 @@ def api_path():
     b = (request.args.get("b") or "").strip()
     if not a or not b:
         return jsonify({"status": "empty"}), 400
-    return jsonify(solve_logged(a, b, pick_lang()))
+    lang = pick_lang()
+    r = solve_logged(a, b, lang)
+    # 렌더링을 JS 에 복제하지 않는다. 이스케이프도 여기서 한 번만 한다.
+    r["html"] = _render(r, a, b, lang)
+    return jsonify(r)
 
 
 @app.get("/go")

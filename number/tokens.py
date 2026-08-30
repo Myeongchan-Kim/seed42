@@ -67,15 +67,28 @@ def _load(lang: str):
             warnings.filterwarnings("ignore")
             name = {"ja": "ja_core_news_sm", "es": "es_core_news_sm",
                     "en": "en_core_web_sm"}[lang]
-            obj = spacy.load(name, disable=["parser", "ner"])
+            # parser 를 켠다. 없으면 t.children 이 비어 복합어를 못 만들고
+            # 'black hole' 에서 'hole' 만 남아 엉뚱한 엣지가 생긴다. 2.2배 느리다.
+            obj = spacy.load(name, disable=["ner"])
         _nlp[lang] = obj
         return obj
 
 
-# 어느 언어에서나 내용이 없는 것들
-JUNK = {"것", "수", "등", "때", "곳", "점", "바", "데", "중", "внутри",
-        "one", "two", "three", "first", "second", "next", "last", "part",
-        "example", "way", "thing", "kind", "type", "case", "time", "year"}
+# 내용이 없는 것들. 최소로 유지한다.
+#
+# 의존명사·조수사는 kiwi 가 NNB 로 태깅하므로 여기 넣을 필요가 없다
+# ('간'은 liver 일 때 NNG, '사이'일 때 NNB / '수'는 number 일 때 NNG,
+#  '할 수 있다'일 때 NNB). 목록으로 막으면 진짜 명사까지 함께 죽는다 -
+# 처음에 간·물·성·인·화·점·말을 넣었다가 전부 잃을 뻔했다.
+JUNK = {
+    # 조사·어미가 명사로 잘못 분석된 것
+    "은", "는", "이", "가", "을", "를", "의", "에", "도", "만", "로", "와",
+    "과", "르", "야", "요", "죠",
+    # NNG 로 나오지만 내용이 없는 것
+    "것", "때", "예", "등", "뿐", "듯", "따위", "및",
+    "one", "two", "three", "first", "second", "next", "last", "part",
+    "example", "way", "thing", "kind", "type", "case", "time", "year",
+}
 
 
 def spans(text: str, lang: str | None = None) -> list[tuple[int, int, str]]:
@@ -87,10 +100,13 @@ def spans(text: str, lang: str | None = None) -> list[tuple[int, int, str]]:
 
     if lang == "ko":
         # SH(한자)를 빼면 한국어 본문의 한자 표기가 통째로 사라진다.
-        # '산소' 응답의 酸素·山所·省墓 가 전부 버려지고 있었다. 한국어→한자
-        # 다리를 측정 도구가 지우면 언어 간 비대칭이 실제보다 낮게 나온다.
+        # '산소' 응답의 酸素·山所·省墓 가 전부 버려지고 있었다.
+        #
+        # 한 글자 명사도 받는다. 질·뇌·폐·간·눈·물·불·빛·꿈·힘·법·돈 처럼
+        # 한국어에는 한 글자 명사가 많아 len>=2 로 자르면 통째로 사라진다.
+        # 대신 의존명사와 조사 오분석이 딸려오므로 JUNK 로 막는다.
         for t in nlp.tokenize(text):
-            if t.tag in ("NNG", "NNP", "SL", "SH") and len(t.form) >= 2:
+            if t.tag in ("NNG", "NNP", "SH") or (t.tag == "SL" and len(t.form) >= 2):
                 out.append((t.start, t.start + t.len, t.form))
     elif lang == "zh":
         pos = 0
@@ -100,11 +116,24 @@ def spans(text: str, lang: str | None = None) -> list[tuple[int, int, str]]:
                 out.append((pos, pos + len(w), w))
             pos += len(w)
     else:
-        for t in nlp(text):
-            if (t.pos_ in ("NOUN", "PROPN") and not t.is_stop
-                    and len(t.text) >= 2 and not t.like_num):
-                lemma = t.lemma_ or t.text
-                out.append((t.idx, t.idx + len(t.text), lemma))
+        doc = nlp(text)
+        for t in doc:
+            if (t.pos_ not in ("NOUN", "PROPN") or t.is_stop
+                    or len(t.text) < 2 or t.like_num):
+                continue
+            # 복합어가 있으면 그것을 쓰고 낱개 명사는 넣지 않는다.
+            # 'a black hole' 에서 'hole' 만 남기면 '중력 -> 구멍' 같은 가짜
+            # 엣지가 생긴다. 본문이 말한 것은 'black hole' 이다.
+            mods = [c for c in t.children
+                    if c.dep_ in ("compound", "amod")
+                    and c.pos_ in ("NOUN", "PROPN", "ADJ") and not c.is_stop]
+            if mods:
+                st = min(m.i for m in mods)
+                span = doc[st : t.i + 1]
+                if len(span) <= 3 and span.text.strip():
+                    out.append((span.start_char, span.end_char, span.text))
+                    continue
+            out.append((t.idx, t.idx + len(t.text), t.lemma_ or t.text))
 
     return [(a, b, w) for a, b, w in out
             if w.lower() not in JUNK and not w.isdigit()]
