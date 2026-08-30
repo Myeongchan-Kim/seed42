@@ -123,6 +123,20 @@ CREATE TABLE IF NOT EXISTS run (
 );
 CREATE INDEX IF NOT EXISTS ix_run_pair ON run(start_word, target_word);
 
+-- 사람들이 무엇을 찾았는가. 대시보드(인기 경로·실시간 검색어)의 재료다.
+CREATE TABLE IF NOT EXISTS search_log (
+  id         INTEGER PRIMARY KEY,
+  kind       TEXT NOT NULL,          -- path | word
+  a          TEXT NOT NULL,
+  b          TEXT,                   -- path 일 때만
+  status     TEXT,                   -- ok | nolink | unseen
+  hops       INTEGER,
+  lang       TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_log_kind ON search_log(kind, id);
+CREATE INDEX IF NOT EXISTS ix_log_pair ON search_log(a, b);
+
 -- 임베딩은 숫자 색인이라 원장에 JSON 으로 넣으면 비대해진다. float32 BLOB 으로 따로.
 CREATE TABLE IF NOT EXISTS embedding (
   model TEXT NOT NULL,
@@ -213,7 +227,7 @@ def _upgrade(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # SQLite 는 동시 writer 를 못 견딘다. 모든 쓰기를 하나의 락으로 직렬화한다.
 #
@@ -409,3 +423,14 @@ def find_config(conn: sqlite3.Connection, gen_model: str, extract_model: str,
         " AND k=? AND prompt_version=? AND seed=?",
         (gen_model, extract_model, k, prompt_version, seed)).fetchone()
     return row["id"] if row else None
+
+
+def log_search(conn, kind: str, a: str, b: str | None = None,
+               status: str | None = None, hops: int | None = None,
+               lang: str | None = None) -> None:
+    conn.execute(
+        "INSERT INTO search_log (kind, a, b, status, hops, lang, created_at)"
+        " VALUES (?,?,?,?,?,?,?)", (kind, a, b, status, hops, lang, now()))
+
+
+log_search = _serialized(log_search)
