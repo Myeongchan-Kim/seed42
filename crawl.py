@@ -39,17 +39,24 @@ def expanded(conn) -> set[str]:
         " WHERE r.gen_model=?", (llm.GEN_MODEL,))}
 
 
-def frontier(conn, limit: int) -> list[str]:
+def frontier(conn, limit: int, langs: list[str] | None = None) -> list[str]:
     """이웃으로만 등장하고 아직 안 던져본 단어. 진입차수 높은 것부터 -
-    여러 곳에서 가리키는 단어일수록 그래프의 중심에 가깝다."""
+    여러 곳에서 가리키는 단어일수록 그래프의 중심에 가깝다.
+
+    langs 를 주면 그 언어의 노드만 판다. 안 주면 그래프가 영어 중심이라
+    다른 언어 시드를 넣어도 곧바로 영어 영역으로 끌려간다 (ko->en 이 en->ko 의
+    1,097배라 한번 넘어가면 돌아오지 못한다)."""
     cfg = click_config(conn)
-    rows = conn.execute(
-        "SELECT n.word, COUNT(*) AS indeg FROM edge e JOIN node n ON n.id=e.dst_id"
-        " WHERE e.config_id=? AND NOT EXISTS ("
-        "   SELECT 1 FROM response r WHERE r.node_id=n.id AND r.gen_model=?)"
-        " GROUP BY e.dst_id ORDER BY indeg DESC LIMIT ?",
-        (cfg, llm.GEN_MODEL, limit)).fetchall()
-    return [r["word"] for r in rows if tokens.is_word(r["word"])]
+    q = ("SELECT n.word, COUNT(*) AS indeg FROM edge e JOIN node n ON n.id=e.dst_id"
+         " WHERE e.config_id=? AND NOT EXISTS ("
+         "   SELECT 1 FROM response r WHERE r.node_id=n.id AND r.gen_model=?)")
+    args: list = [cfg, llm.GEN_MODEL]
+    if langs:
+        q += f" AND n.lang IN ({','.join('?' * len(langs))})"
+        args += langs
+    q += " GROUP BY e.dst_id ORDER BY indeg DESC LIMIT ?"
+    args.append(limit)
+    return [r["word"] for r in conn.execute(q, args) if tokens.is_word(r["word"])]
 
 
 def visit(word: str) -> int:
@@ -116,6 +123,7 @@ def main() -> None:
     p.add_argument("--seed-file", help="줄바꿈으로 구분된 단어 파일")
     p.add_argument("--frontier", action="store_true",
                    help="기존 그래프의 미확장 노드를 진입차수 순으로 판다")
+    p.add_argument("--lang", nargs="*", help="프론티어를 이 언어로 제한 (ko zh ja es en)")
     p.add_argument("--limit", type=int, default=100, help="이번에 던질 단어 수")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--hours", type=float, help="이 시간이 지나면 멈춘다")
@@ -131,7 +139,7 @@ def main() -> None:
     if a.seed_file:
         words += [l.strip() for l in open(a.seed_file) if l.strip()]
     if a.frontier:
-        words += frontier(conn, a.limit * 3)
+        words += frontier(conn, a.limit * 3, a.lang)
 
     seen = expanded(conn)
     todo, dedup = [], set()
@@ -187,7 +195,8 @@ def main() -> None:
         if STOP.is_set() or (deadline and time.time() > deadline):
             break
         seen = expanded(conn)
-        todo = [w for w in frontier(conn, a.limit) if norm(w) not in seen][: a.limit]
+        todo = [w for w in frontier(conn, a.limit, a.lang)
+                if norm(w) not in seen][: a.limit]
         if not todo:
             print("  프론티어가 비었다.", flush=True)
 

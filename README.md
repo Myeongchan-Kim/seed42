@@ -6,49 +6,50 @@
 
 ## 실험이 묻는 것
 
-LLM에게 맥락 없이 단어 하나만 던지면 긴 답변이 나온다. 그 답변에서 단어를
-골라 다시 던지면 사슬이 이어진다. 이 사슬이 **인간관계처럼 발산해서 어디든
-닿는가**, 아니면 **주제 안에 갇혀 다른 영역으로 못 넘어가는가?**
+LLM 에게 맥락 없이 단어 하나만 던지면 긴 답변이 나온다. 그 답변에 등장한 단어를
+다시 던지면 사슬이 이어진다. 이 사슬이 **인간관계처럼 발산해서 어디든 닿는가**,
+아니면 **주제 안에 갇혀 다른 영역으로 못 넘어가는가?**
 
-이건 밀그램의 6단계 실험과 같은 질문이고, 밀그램이 그랬듯 두 개로 갈린다.
+밀그램의 6단계 실험과 같은 질문이고, 밀그램이 그랬듯 두 개로 갈린다.
 
 - **연결성(connectivity)** — 짧은 경로가 *존재하는가*
 - **탐색가능성(navigability)** — 전체 지도 없이 그 경로를 *찾아낼 수 있는가*
 
-사회연결망은 전자가 참이면서 후자가 훨씬 어렵다. 세 정책을 같은 그래프 위에서
-비교하면 LLM 연상망이 어느 쪽인지 갈라진다.
-
-| 정책 | 목표어를 아는 주체 | 측정하는 것 |
-|---|---|---|
-| `blind` | 없음. 후보 중 목표어와 임베딩이 가까운 것을 고름 | 연상망의 **구조** |
-| `aware` | LLM이 목표어를 알고 다리 단어를 고름 | LLM의 **네비게이션 능력** |
-| `random` | 없음 | 기준선 — 그룹핑이 얼마나 센가 |
-
-`blind`는 실패하는데 `aware`만 성공하면: 경로는 있지만 국소 정보로는 못 찾는다
-= 심한 그룹핑.
+실측 결과 둘은 크게 다르다. `TCA cycle ↔ 베르세르크` 는 8홉으로 이어져 있지만,
+온라인 탐색으로는 찾지 못했다. 관측을 쌓은 뒤 BFS 로 재야 실제 거리가 나온다.
 
 ## 쓰는 법
 
-    cp .env.example .env      # OPENAI_API_KEY 채우기
+    cp .env.example .env      # GEMINI_API_KEY 채우기
     uv venv && uv pip install -r requirements.txt
+    .venv/bin/python -m spacy download en_core_web_sm   # es/ja 도 필요하면 함께
 
-    .venv/bin/python run.py "TCA cycle" "베르세르크"
-    .venv/bin/python run.py "은행" "슬픔" --policy aware --budget 60
+    python server.py               # Seed 42 — 클릭 탐색, http://127.0.0.1:5001
+    python crawl.py --seed-file seeds.txt --frontier --hours 2 --workers 12
+    python crawl.py --status
+    python path.py "TCA cycle" "베르세르크"
+    python graph_report.py
 
 키는 **`.env` 에서만** 읽는다. 셸 환경변수는 보지 않는다.
 
 ## 구조
 
-    number/llm.py      캐시된 LLM 호출 (생성·추출·정규화·판정·임베딩)
-    number/search.py   best-first 탐색과 세 정책
-    run.py             CLI
-    cache/             단어별 응답 캐시 — 같은 단어는 항상 같은 이웃
-    runs/              실행 기록 (경로·엣지·유사도 추이)
+    number/llm.py      제공자 추상화(Gemini/OpenAI), 호출 원장 겸 캐시
+    number/db.py       SQLite 스키마
+    number/tokens.py   언어별 형태소 분석기
+    number/graph.py    그래프 지표
+    server.py          클릭으로 걷는 탐색 (4개 언어 UI)
+    crawl.py           병렬 배치 크롤러 (재개 가능)
+    retokenize.py      캐시된 응답 재분석 (API 호출 없음)
+    path.py            누적 그래프에서 BFS 최단경로
+    introspect.py      LLM 의 자기 연상 내성 정확도
+    langpull.py        언어별 영어 흡인력
+    seeds_live.py      실제로 유통되는 키워드를 시드로 수집
 
-확장 한 단계는 두 호출로 나뉜다. 맨 단어를 던져 긴 답변을 받고(실험의 본질이라
-그대로 둔다), 거기서 핵심 단어 K개를 뽑는다. 노드 하나의 차수가 K로 고정돼야
-탐색이 성립한다. 응답은 디스크에 캐싱하므로 그래프는 확률과정이 아니라 **고정된
-하나의 그래프**이고, 세 정책이 같은 그래프를 걷는다.
+확장 한 단계는 단어 하나를 던져 긴 답변을 받고, 그 본문에 등장한 **모든 명사**를
+이웃으로 삼는다. 응답은 `(모델, 단어, seed)` 로 캐싱되므로 그래프는 확률과정이 아니라
+고정된 하나의 그래프다. 토크나이저를 바꾸면 API 호출 없이 `retokenize.py` 로 다시
+훑을 수 있다.
 
 ## 저장 계층
 
