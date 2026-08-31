@@ -159,8 +159,15 @@ STR = {
                  "ko": "아직 없습니다 — {n}홉 넘게 떨어진 쌍을 찾아보세요!",
                  "zh": "还没有这么远的 — 找一对相隔 {n} 跳的词吧！",
                  "es": "Nada tan lejos aún — ¡encuentra un par a {n} saltos!"},
-    "closest":  {"en": "Closest", "ko": "가장 가까운 경로",
-                 "zh": "距离最近", "es": "Más cercanas"},
+    "shared":   {"en": "Most shared", "ko": "많이 공유된 경로",
+                 "zh": "分享最多", "es": "Más compartidas"},
+    "asym":     {"en": "One-way streets", "ko": "돌아오지 못하는 길",
+                 "zh": "单行道", "es": "Calles de un solo sentido"},
+    "asymsub":  {"en": "A→B is short, B→A is not",
+                 "ko": "가기는 쉬운데 돌아오기는 어려운 쌍",
+                 "zh": "去容易，回来难", "es": "Ir es fácil, volver no"},
+    "unreach":  {"en": "no way back", "ko": "돌아올 길 없음",
+                 "zh": "无法返回", "es": "sin regreso"},
     "livewords":{"en": "Live searches", "ko": "실시간 검색어",
                  "zh": "实时搜索", "es": "Búsquedas en vivo"},
     "livepairs":{"en": "Recent pairs", "ko": "최근 검색 쌍",
@@ -276,6 +283,17 @@ function bind(root) {
     rec.textContent = res.ok
       ? L.held + ' ' + (res.name || '—') + ' · ' + res.hops + ' ' + L.hops
       : L.held + ' ' + (res.holder || '—');
+  });
+  root.querySelectorAll('.sh[data-to]').forEach(el => {
+    el.addEventListener('click', () => {
+      // 링크가 새 탭으로 나가므로 sendBeacon 으로 보낸다. 페이지가 떠나도 남는다.
+      const p = JSON.stringify({a: el.dataset.a, b: el.dataset.b,
+                                to: el.dataset.to, hops: +el.dataset.hops});
+      if (navigator.sendBeacon)
+        navigator.sendBeacon('/api/share', new Blob([p], {type: 'application/json'}));
+      else fetch('/api/share', {method: 'POST', keepalive: true,
+                 headers: {'Content-Type': 'application/json'}, body: p});
+    });
   });
   const more = root.querySelector('#shmore');
   if (more) more.addEventListener('click', async () => {
@@ -424,6 +442,75 @@ def far_threshold(p: float = 0.10) -> int:
         if sum(1 for v in vals if v >= h) / n <= p:
             return h
     return max(vals)
+
+
+_OPEN: dict = {"key": None, "rows": []}
+
+
+def still_open(limit: int = 6) -> list[dict]:
+    """아직 이어지지 않은 쌍. 기록만 보면 안 되고 지금 다시 풀어봐야 한다 -
+    그래프가 자라 이미 이어진 쌍을 '도와주세요' 로 계속 보여주고 있었다."""
+    c = conn()
+    n = c.execute("SELECT COUNT(*) x FROM search_log WHERE kind='path'").fetchone()["x"]
+    key = (_G["rowid"], n)
+    if _OPEN["key"] == key:
+        return _OPEN["rows"][:limit]
+    adj, rev = graph_adj()
+    seen, out = set(), []
+    for r in c.execute("""SELECT a, b, COUNT(*) c FROM search_log
+                          WHERE kind='path' AND status<>'ok'
+                          GROUP BY lower(a), lower(b)
+                          ORDER BY c DESC, MAX(id) DESC LIMIT 80"""):
+        k = (r["a"].lower(), r["b"].lower())
+        if k in seen:
+            continue
+        seen.add(k)
+        ia, ib = node_of(r["a"]), node_of(r["b"])
+        if ia and ib and shortest(adj, rev, ia, ib):
+            continue                       # 그사이 이어졌다
+        out.append({"a": r["a"], "b": r["b"], "c": r["c"]})
+    _OPEN.update(key=key, rows=out)
+    return out[:limit]
+
+
+_ASYM: dict = {"key": None, "rows": []}
+
+
+def asymmetric_pairs(limit: int = 6) -> list[dict]:
+    """A→B 는 가까운데 B→A 는 멀거나 아예 없는 쌍.
+
+    상호성이 0.068 이라 대부분의 연상은 일방통행이다. 그 성질이 눈에 보이게
+    한다. 사람들이 실제로 찾아본 쌍만 대상으로 하고, 반대 방향은 여기서 푼다."""
+    c = conn()
+    n = c.execute("SELECT COUNT(*) x FROM search_log WHERE kind='path'").fetchone()["x"]
+    key = (_G["rowid"], n)
+    if _ASYM["key"] == key:
+        return _ASYM["rows"][:limit]
+    adj, rev = graph_adj()
+    seen, out = set(), []
+    for r in c.execute("""SELECT a, b FROM search_log WHERE kind='path'
+                          AND status='ok' GROUP BY lower(a), lower(b)
+                          ORDER BY MAX(id) DESC LIMIT 150"""):
+        a, b = r["a"], r["b"]
+        k = tuple(sorted((a.lower(), b.lower())))
+        if k in seen:
+            continue
+        seen.add(k)
+        ia, ib = node_of(a), node_of(b)
+        if not ia or not ib:
+            continue
+        pf = shortest(adj, rev, ia, ib)
+        pb = shortest(adj, rev, ib, ia)
+        if not pf:
+            continue
+        fwd = len(pf) - 1
+        back = len(pb) - 1 if pb else None
+        gap = 99 if back is None else back - fwd
+        if gap >= 2:
+            out.append({"a": a, "b": b, "fwd": fwd, "back": back, "gap": gap})
+    out.sort(key=lambda r: (-r["gap"], r["fwd"]))
+    _ASYM.update(key=key, rows=out)
+    return out[:limit]
 
 
 def rarity(hops: int) -> float | None:
@@ -607,6 +694,8 @@ background:var(--accent-soft);color:var(--accent);white-space:nowrap}
 .pill.big{font-size:13px;padding:3px 11px;font-weight:500}
 ul.rows.far li{padding:10px 0}
 ul.rows.far li a{font-size:15px}
+a.revlink{color:var(--faint);text-decoration:none;font-size:13px;padding:0 2px}
+a.revlink:hover{color:var(--accent)}
 .cnt{font-family:var(--mono);font-size:11px;color:var(--faint);min-width:20px;
 text-align:right;font-variant-numeric:tabular-nums}
 .tags{display:flex;flex-wrap:wrap;gap:5px}
@@ -787,13 +876,11 @@ def index():
                ORDER BY h DESC LIMIT 20""", fth)
     far = random.sample(far, min(5, len(far)))
     far.sort(key=lambda r: -r["h"])
-    near = q("""SELECT a, b, MIN(hops) h FROM search_log
-                WHERE kind='path' AND status='ok' AND hops > 0
-                GROUP BY lower(a), lower(b) ORDER BY h ASC LIMIT 6""")
-    # 아직 이어지지 않은 쌍 — 도와줄 거리
-    open_pairs = q("""SELECT a, b, COUNT(*) c FROM search_log
-                      WHERE kind='path' AND status<>'ok'
-                      GROUP BY lower(a), lower(b) ORDER BY c DESC LIMIT 6""")
+    asym = asymmetric_pairs(6)
+    shared = q("""SELECT a, b, COUNT(*) c, MIN(hops) h FROM search_log
+                  WHERE kind='share' GROUP BY lower(a), lower(b)
+                  ORDER BY c DESC, MAX(id) DESC LIMIT 6""")
+    open_pairs = still_open(6)
     live_words = q("""SELECT a, COUNT(*) c FROM search_log WHERE kind='word'
                       GROUP BY lower(a) ORDER BY MAX(id) DESC LIMIT 18""")
     live_pairs = q("""SELECT a, b, status, hops FROM search_log WHERE kind='path'
@@ -821,6 +908,18 @@ def index():
                 f'{html.escape(r["a"])} <span class="arr">⇢</span> '
                 f'{html.escape(r["b"])}</a>'
                 f'<span class="pill warn">{T(lang, "nolink").split("—")[0].strip()}</span></li>')
+
+    def asymrow(r):
+        fwd, back = r["fwd"], r["back"]
+        tag = (f'<span class="pill warn">{T(lang, "unreach")}</span>'
+               if back is None else f'<span class="pill">{back}</span>')
+        link = url_for("find_path", a=r["a"], b=r["b"], lang=lang)
+        rev = url_for("find_path", a=r["b"], b=r["a"], lang=lang)
+        return (f'<li><a href="{html.escape(link)}">'
+                f'{html.escape(r["a"])} <span class="arr">→</span> '
+                f'{html.escape(r["b"])}</a>'
+                f'<span class="pill">{fwd}</span>'
+                f'<a class="revlink" href="{html.escape(rev)}">↩</a>{tag}</li>')
 
     def liverow(r):
         st = r["status"]
@@ -850,12 +949,15 @@ def index():
           <p class="lbl">{T(lang, "farthest")} · {fth}+ {T(lang, "hops")}</p>
           <ul class="rows far">{"".join(hoprow(r, True) for r in far)
               or f'<li class="note">{T(lang, "nofar").format(n=fth)}</li>'}</ul>
-          {'<p class="lbl">' + T(lang, "closest") + '</p><ul class="rows">'
-           + "".join(hoprow(r) for r in near) + '</ul>' if near else ''}
+          {'<p class="lbl">' + T(lang, "asym") + '</p>'
+           '<p class="note">' + T(lang, "asymsub") + '</p><ul class="rows">'
+           + "".join(asymrow(r) for r in asym) + '</ul>' if asym else ''}
         </section>
         <section>
           {'<p class="lbl">' + T(lang, "nolink").split("—")[0].strip() + '</p><ul class="rows">'
            + "".join(openrow(r) for r in open_pairs) + '</ul>' if open_pairs else ''}
+          {'<p class="lbl">' + T(lang, "shared") + '</p><ul class="rows">'
+           + "".join(pathrow(r) for r in shared) + '</ul>' if shared else ''}
           <p class="lbl">{T(lang, "toppath")}</p>
           <ul class="rows">{"".join(pathrow(r) for r in top) or empty}</ul>
           <p class="lbl">{T(lang, "livepairs")}</p>
@@ -1009,10 +1111,13 @@ def share_bar(a: str, b: str, hops: int, lang: str,
         ("Facebook", f"https://www.facebook.com/sharer/sharer.php?u={e_l}"),
         ("LinkedIn", f"https://www.linkedin.com/sharing/share-offsite/?url={e_l}"),
     ]
-    btns = "".join(f'<a class="sh" target="_blank" rel="noopener" '
-                   f'href="{html.escape(u)}">{n}</a>' for n, u in outs)
-    return (f'<div class="sharebar"><span class="shlbl">{T(lang, "share")}</span>{btns}'
-            f'<button class="sh" type="button" id="shmore" '
+    d = (f'data-a="{html.escape(a)}" data-b="{html.escape(b)}" '
+         f'data-hops="{hops}"')
+    btns = "".join(f'<a class="sh" target="_blank" rel="noopener" {d} '
+                   f'data-to="{n}" href="{html.escape(u)}">{n}</a>' for n, u in outs)
+    return (f'<div class="sharebar" id="sharebar">'
+            f'<span class="shlbl">{T(lang, "share")}</span>{btns}'
+            f'<button class="sh" type="button" id="shmore" {d} data-to="copy" '
             f'data-url="{html.escape(link)}" data-text="{html.escape(txt)}">'
             f'Instagram · {T(lang, "copylink")}</button></div>')
 
@@ -1086,6 +1191,19 @@ def api_snippet():
         "match": text[st:en],
         "after": text[en:hi] + ("…" if hi < len(text) else ""),
     })
+
+
+@app.post("/api/share")
+def api_share():
+    """공유 버튼 클릭을 남긴다. 링크가 외부로 나가므로 sendBeacon 으로 받는다.
+    search_log 를 재사용한다 - kind='share', status 에 어디로 나갔는지."""
+    from flask import jsonify
+    d = request.get_json(silent=True, force=True) or {}
+    a, b = (d.get("a") or "").strip(), (d.get("b") or "").strip()
+    to = (d.get("to") or "")[:20]
+    if a and b:
+        db.log_search(conn(), "share", a, b, to, d.get("hops"), pick_lang())
+    return jsonify({"ok": True})
 
 
 @app.post("/api/record")
