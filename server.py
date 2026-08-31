@@ -155,6 +155,10 @@ STR = {
                  "zh": "热门路径", "es": "Más buscadas"},
     "farthest": {"en": "Farthest apart", "ko": "가장 먼 경로",
                  "zh": "距离最远", "es": "Más lejanas"},
+    "nofar":    {"en": "Nothing this far yet — find a pair {n} hops apart!",
+                 "ko": "아직 없습니다 — {n}홉 넘게 떨어진 쌍을 찾아보세요!",
+                 "zh": "还没有这么远的 — 找一对相隔 {n} 跳的词吧！",
+                 "es": "Nada tan lejos aún — ¡encuentra un par a {n} saltos!"},
     "closest":  {"en": "Closest", "ko": "가장 가까운 경로",
                  "zh": "距离最近", "es": "Más cercanas"},
     "livewords":{"en": "Live searches", "ko": "실시간 검색어",
@@ -407,6 +411,21 @@ def hop_distribution(n: int = 500) -> list[int]:
     return vals
 
 
+def far_threshold(p: float = 0.10) -> int:
+    """'가장 먼 경로' 에 올릴 최소 홉 수. 무작위 쌍 중 상위 p 에 드는 값.
+
+    고정 숫자로 박으면 그래프가 자랄 때 어긋난다. 지금은 중앙값이 3~4홉이라
+    5홉짜리는 자랑거리가 못 된다 - 절반 가까이가 그만큼 떨어져 있다."""
+    vals = hop_distribution()
+    if not vals:
+        return 6
+    n = len(vals)
+    for h in sorted(set(vals)):
+        if sum(1 for v in vals if v >= h) / n <= p:
+            return h
+    return max(vals)
+
+
 def rarity(hops: int) -> float | None:
     """이 거리보다 먼 무작위 쌍의 비율. 0.01 이면 상위 1%."""
     vals = hop_distribution()
@@ -426,6 +445,59 @@ def has_response(word: str) -> bool:
         "SELECT 1 FROM response r JOIN node n ON n.id=r.node_id"
         " WHERE lower(n.word)=lower(?) AND r.gen_model=? LIMIT 1",
         (word.strip(), llm.GEN_MODEL)).fetchone() is not None
+
+
+# ------------------------------------------------------- 사전 최장일치
+
+_VOCAB: dict = {"rowid": -1, "words": set(), "maxlen": 2}
+
+
+def vocab():
+    """이미 그래프에 있는 단어들. 본문에서 이것들을 최장일치로 잡는다.
+
+    형태소 분석기만으로는 'black hole' 을 잡아도 'event horizon' 을 놓치는 식으로
+    들쭉날쭉하다. 반면 한 번이라도 노드가 된 말은 확실히 하나의 단위다.
+    그래서 파서 결과 위에 사전 일치를 덧대고, 겹치면 긴 쪽을 쓴다.
+
+    다중 패턴이라 KMP(패턴 하나)가 아니라, 토큰 경계에서 시작하는 후보를
+    긴 것부터 집합 조회한다. 응답 하나가 1~2천 자라 이 방식으로 충분히 빠르다.
+    """
+    c = conn()
+    top = c.execute("SELECT MAX(rowid) x FROM node").fetchone()["x"] or 0
+    if _VOCAB["rowid"] == top:
+        return _VOCAB["words"], _VOCAB["maxlen"]
+    ws = {r["word"].lower() for r in c.execute(
+        "SELECT word FROM node WHERE length(word) >= 4 AND instr(word, ' ') > 0")}
+    _VOCAB.update(rowid=top, words=ws,
+                  maxlen=max((len(w) for w in ws), default=2))
+    return ws, _VOCAB["maxlen"]
+
+
+def merge_known(text: str, spans: list) -> list:
+    """파서가 준 구간 위에 사전 최장일치를 덧댄다. 겹치면 긴 쪽이 이긴다."""
+    ws, maxlen = vocab()
+    if not ws:
+        return spans
+    starts = sorted({a for a, _, _ in spans})
+    hits = []
+    for a in starts:
+        best = None
+        for b in range(min(len(text), a + min(maxlen, 60)), a, -1):
+            cand = text[a:b]
+            if len(cand) >= 4 and cand.lower() in ws:
+                best = (a, b, cand)
+                break
+        if best:
+            hits.append(best)
+    if not hits:
+        return spans
+    merged = sorted(spans + hits, key=lambda s: (s[0], -(s[1] - s[0])))
+    out, last = [], -1
+    for a, b, w in merged:
+        if a >= last:
+            out.append((a, b, w))
+            last = b
+    return out
 
 
 # ------------------------------------------------------------------- 렌더링
@@ -657,7 +729,7 @@ class _Linkify(HTMLParser):
         last = 0
         # 형태소 분석기가 준 위치에 그대로 링크를 건다. 표제어만 받으면
         # 본문 어디를 감싸야 할지 알 수 없다.
-        for a, b, lemma in tokens.spans(data, self.lang):
+        for a, b, lemma in merge_known(data, tokens.spans(data, self.lang)):
             if a < last:
                 continue
             self.out.append(html.escape(data[last:a]))
@@ -706,10 +778,13 @@ def index():
                GROUP BY lower(a), lower(b) ORDER BY c DESC, h ASC LIMIT 10""")
     # 가장 멀리 떨어진 쌍. 인기는 '무엇이 궁금했나'지만 거리는 '그래프가 어떻게
     # 생겼나'라서, 니치한 대상이나 언어를 건너는 경로가 여기 올라온다.
-    # 상위 20 중 무작위 5개. 전부 보여주면 매번 같은 목록이라 다시 볼 이유가 없다.
+    # 흔한 거리는 올리지 않는다. 분포에서 상위 10% 컷을 뽑아 그 이상만 본다.
+    # 그중 20개를 모아 무작위 5개 - 전부 보여주면 매번 같아 다시 볼 이유가 없다.
+    fth = far_threshold()
     far = q("""SELECT a, b, MIN(hops) h FROM search_log
                WHERE kind='path' AND status='ok'
-               GROUP BY lower(a), lower(b) ORDER BY h DESC LIMIT 20""")
+               GROUP BY lower(a), lower(b) HAVING h >= ?
+               ORDER BY h DESC LIMIT 20""", fth)
     far = random.sample(far, min(5, len(far)))
     far.sort(key=lambda r: -r["h"])
     near = q("""SELECT a, b, MIN(hops) h FROM search_log
@@ -772,8 +847,9 @@ def index():
       </div>
       <div class="cols">
         <section>
-          <p class="lbl">{T(lang, "farthest")}</p>
-          <ul class="rows far">{"".join(hoprow(r, True) for r in far) or empty}</ul>
+          <p class="lbl">{T(lang, "farthest")} · {fth}+ {T(lang, "hops")}</p>
+          <ul class="rows far">{"".join(hoprow(r, True) for r in far)
+              or f'<li class="note">{T(lang, "nofar").format(n=fth)}</li>'}</ul>
           {'<p class="lbl">' + T(lang, "closest") + '</p><ul class="rows">'
            + "".join(hoprow(r) for r in near) + '</ul>' if near else ''}
         </section>

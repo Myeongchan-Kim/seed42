@@ -124,6 +124,11 @@ def spans(text: str, lang: str | None = None) -> list[tuple[int, int, str]]:
             # 복합어가 있으면 그것을 쓰고 낱개 명사는 넣지 않는다.
             # 'a black hole' 에서 'hole' 만 남기면 '중력 -> 구멍' 같은 가짜
             # 엣지가 생긴다. 본문이 말한 것은 'black hole' 이다.
+            # 자신이 다른 명사의 수식어라면 그 복합어에 흡수되므로 따로 넣지 않는다.
+            # 넣으면 'event horizon' 과 'event' 가 둘 다 노드가 되어 쪼개진다.
+            if (t.dep_ in ("compound", "amod") and t.head is not t
+                    and t.head.pos_ in ("NOUN", "PROPN")):
+                continue
             mods = [c for c in t.children
                     if c.dep_ in ("compound", "amod")
                     and c.pos_ in ("NOUN", "PROPN", "ADJ") and not c.is_stop]
