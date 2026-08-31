@@ -100,3 +100,18 @@ LLM 에게 맥락 없이 단어 하나만 던지면 긴 답변이 나온다. 그
 한국어 토큰은 조사·어미를 떼고 명사로 보이는 것만 링크한다. 어미 한 글자로 거르면
 `미토콘드리아`(아), `에너지`(지), `은하`(하) 처럼 명사 끝소리와 부딪히므로, 어간까지
 포함한 형태(`하며`, `되는`, `한다`)로만 판단한다.
+
+## 배포
+
+Compute Engine VM 한 대에 Caddy + waitress + systemd 로 올린다.
+크롤은 systemd timer 가 매일 돌린다 (`deploy/` 참조).
+
+    bash deploy/setup.sh           # VM 초기 설치 (여러 번 실행해도 안전)
+
+`.env` 에 필요한 것:
+
+    GEMINI_API_KEY=...
+    PUBLIC_URL=https://<도메인>     # 없으면 공유 버튼을 숨긴다
+    CF_API_TOKEN=...               # Caddy 의 DNS-01 인증서 발급용
+
+인증서는 DNS-01 로 받는다. Cloudflare 프록시를 켜면 HTTP-01 검증이 막힐 수 있다.
