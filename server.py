@@ -17,6 +17,7 @@ import json
 import random
 import re
 import threading
+import time
 import urllib.parse as U
 from html.parser import HTMLParser
 from pathlib import Path
@@ -428,15 +429,19 @@ def _join(fp, bp, u, v):
     return left[::-1] + right
 
 
-_DIST: dict = {"rowid": -1, "vals": []}
+# 무거운 통계는 시간 기준으로 캐싱한다. 그래프 버전으로 걸면 크롤이 도는 동안
+# 매 요청마다 무효화되어 500쌍 BFS 를 다시 돌린다 (대시보드가 15초까지 늘었다).
+STATS_TTL = 300.0
+
+_DIST: dict = {"at": 0.0, "vals": []}
 
 
 def hop_distribution(n: int = 500) -> list[int]:
     """무작위 쌍의 홉 분포. 백분위를 진짜 수치로 말하기 위한 것.
     그래프가 자라면 분포가 변하므로 하드코딩하지 않고 다시 잰다 (600쌍에 1초)."""
-    adj, rev = graph_adj()
-    if _DIST["rowid"] == _G["rowid"] and _DIST["vals"]:
+    if _DIST["vals"] and time.time() - _DIST["at"] < STATS_TTL:
         return _DIST["vals"]
+    adj, rev = graph_adj()
     pool = list(adj.keys())
     if len(pool) < 50:
         return []
@@ -448,7 +453,7 @@ def hop_distribution(n: int = 500) -> list[int]:
         if p_:
             vals.append(len(p_) - 1)
     vals.sort()
-    _DIST.update(rowid=_G["rowid"], vals=vals)
+    _DIST.update(at=time.time(), vals=vals)
     return vals
 
 
@@ -467,17 +472,15 @@ def far_threshold(p: float = 0.10) -> int:
     return max(vals)
 
 
-_OPEN: dict = {"key": None, "rows": []}
+_OPEN: dict = {"at": 0.0, "rows": []}
 
 
 def still_open(limit: int = 6) -> list[dict]:
     """아직 이어지지 않은 쌍. 기록만 보면 안 되고 지금 다시 풀어봐야 한다 -
     그래프가 자라 이미 이어진 쌍을 '도와주세요' 로 계속 보여주고 있었다."""
-    c = conn()
-    n = c.execute("SELECT COUNT(*) x FROM search_log WHERE kind='path'").fetchone()["x"]
-    key = (_G["rowid"], n)
-    if _OPEN["key"] == key:
+    if _OPEN["rows"] and time.time() - _OPEN["at"] < STATS_TTL:
         return _OPEN["rows"][:limit]
+    c = conn()
     adj, rev = graph_adj()
     seen, out = set(), []
     for r in c.execute("""SELECT a, b, COUNT(*) c FROM search_log
@@ -492,11 +495,11 @@ def still_open(limit: int = 6) -> list[dict]:
         if ia and ib and shortest(adj, rev, ia, ib):
             continue                       # 그사이 이어졌다
         out.append({"a": r["a"], "b": r["b"], "c": r["c"]})
-    _OPEN.update(key=key, rows=out)
+    _OPEN.update(at=time.time(), rows=out)
     return out[:limit]
 
 
-_ASYM: dict = {"key": None, "rows": []}
+_ASYM: dict = {"at": 0.0, "rows": []}
 
 
 def asymmetric_pairs(limit: int = 6) -> list[dict]:
@@ -504,11 +507,9 @@ def asymmetric_pairs(limit: int = 6) -> list[dict]:
 
     상호성이 0.068 이라 대부분의 연상은 일방통행이다. 그 성질이 눈에 보이게
     한다. 사람들이 실제로 찾아본 쌍만 대상으로 하고, 반대 방향은 여기서 푼다."""
-    c = conn()
-    n = c.execute("SELECT COUNT(*) x FROM search_log WHERE kind='path'").fetchone()["x"]
-    key = (_G["rowid"], n)
-    if _ASYM["key"] == key:
+    if _ASYM["rows"] and time.time() - _ASYM["at"] < STATS_TTL:
         return _ASYM["rows"][:limit]
+    c = conn()
     adj, rev = graph_adj()
     seen, out = set(), []
     for r in c.execute("""SELECT a, b FROM search_log WHERE kind='path'
@@ -532,7 +533,7 @@ def asymmetric_pairs(limit: int = 6) -> list[dict]:
         if gap >= 2:
             out.append({"a": a, "b": b, "fwd": fwd, "back": back, "gap": gap})
     out.sort(key=lambda r: (-r["gap"], r["fwd"]))
-    _ASYM.update(key=key, rows=out)
+    _ASYM.update(at=time.time(), rows=out)
     return out[:limit]
 
 

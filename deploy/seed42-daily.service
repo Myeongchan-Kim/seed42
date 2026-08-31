@@ -6,8 +6,11 @@ After=network-online.target
 Type=oneshot
 User=seed42
 WorkingDirectory=/opt/seed42
-ExecStart=/opt/seed42/.venv/bin/python /opt/seed42/daily.py --hours 3
-Nice=10
+# 2 vCPU 라 병렬을 낮춘다. 12 로 두면 형태소 분석이 CPU 를 다 먹어
+# 웹서버가 굶고 응답이 15초까지 늘어난다.
+ExecStart=/opt/seed42/.venv/bin/python /opt/seed42/daily.py --hours 3 --workers 4
+Nice=15
+CPUWeight=20
 IOSchedulingClass=idle
 StandardOutput=append:/opt/seed42/logs/daily.log
 StandardError=append:/opt/seed42/logs/daily.log
