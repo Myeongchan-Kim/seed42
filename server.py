@@ -114,6 +114,21 @@ STR = {
     "seeking":  {"en": "Searching…", "ko": "찾는 중…", "zh": "查找中…",
                  "es": "Buscando…"},
     "share":    {"en": "Share", "ko": "공유", "zh": "分享", "es": "Compartir"},
+    "slogan":   {"en": "How far apart are two words inside an AI?",
+                 "ko": "AI의 머릿속에서 두 단어는 얼마나 멀까?",
+                 "zh": "在 AI 的联想里，两个词相隔多远？",
+                 "es": "¿Qué tan lejos están dos palabras dentro de una IA?"},
+    "chall":    {"en": "Can you find a shorter path?",
+                 "ko": "더 짧은 길을 찾아보세요",
+                 "zh": "你能找到更短的路径吗？",
+                 "es": "¿Puedes encontrar un camino más corto?"},
+    "ogdesc":   {"en": "Throw a word at an AI, follow what comes back. "
+                       "Every word connects — the question is how far.",
+                 "ko": "AI에게 단어 하나를 던지고 돌아온 말을 따라간다. "
+                       "모든 단어는 이어져 있다 — 문제는 얼마나 머냐다.",
+                 "zh": "向 AI 投出一个词，顺着回应走下去。所有词都相连——问题是有多远。",
+                 "es": "Lanza una palabra a una IA y sigue lo que vuelve. "
+                       "Todo se conecta — la pregunta es qué tan lejos."},
     "copied":   {"en": "Link copied", "ko": "링크 복사됨", "zh": "链接已复制",
                  "es": "Enlace copiado"},
     "copylink": {"en": "Copy link", "ko": "링크 복사", "zh": "复制链接",
@@ -177,10 +192,10 @@ def T(lang: str, key: str) -> str:
     return STR[key].get(lang, STR[key]["en"])
 
 
-def respond_html(title: str, body: str, count: int, lang: str):
+def respond_html(title: str, body: str, count: int, lang: str, og: str = ""):
     """언어 선택을 쿠키에 기억한다."""
     from flask import make_response
-    r = make_response(page(title, body, count, lang))
+    r = make_response(page(title, body, count, lang, og))
     if request.args.get("lang") in LANGS:
         r.set_cookie("lang", lang, max_age=60 * 60 * 24 * 365, samesite="Lax")
     return r
@@ -578,12 +593,25 @@ HEAD = ('<!doctype html><meta charset="utf-8">'
         f"<style>{CSS}</style>")
 
 
-def page(title: str, body: str, count: int, lang: str = "en") -> str:
+def og_tags(title: str, desc: str, url: str) -> str:
+    """링크 미리보기 카드. 없으면 X·Facebook·LinkedIn 에서 밋밋한 URL 만 나온다."""
+    def m(prop, val, attr="property"):
+        return f'<meta {attr}="{prop}" content="{html.escape(val)}">'
+    return (m("og:site_name", "Seed 42") + m("og:type", "website")
+            + m("og:title", title) + m("og:description", desc)
+            + (m("og:url", url) if url else "")
+            + m("twitter:card", "summary", "name")
+            + m("twitter:title", title, "name")
+            + m("twitter:description", desc, "name"))
+
+
+def page(title: str, body: str, count: int, lang: str = "en",
+         og: str = "") -> str:
     picker = "".join(
         f'<a class="lang{" on" if code == lang else ""}" '
         f'href="?lang={code}">{name}</a>'
         for code, name in LANGS.items())
-    return (f"{HEAD}<title>{html.escape(title)}</title>"
+    return (f"{HEAD}<title>{html.escape(title)}</title>{og}"
             f'<header><a class="home" href="/">Seed 42</a>'
             f'<a class="navlink" href="{url_for("find_path", lang=lang)}">'
             f'{T(lang, "game")}</a>'
@@ -762,7 +790,9 @@ def index():
               for r in live_words) or f'<span class="note">{T(lang, "empty")}</span>'}</div>
         </section>
       </div>"""
-    return respond_html("Seed 42", body, thrown, lang)
+    return respond_html("Seed 42", body, thrown, lang,
+                        og_tags(f'Seed 42 — {T(lang, "slogan")}',
+                                T(lang, "ogdesc"), PUBLIC_URL))
 
 
 @app.get("/explore")
@@ -811,22 +841,35 @@ def find_path():
         f'placeholder="{T(lang, "ph")}"></label>'
         f'<button>{T(lang, "find")}</button></form>')
 
-    out = ""
-    if a and b:
-        out = _result(a, b, lang)
     labels = {
         "hops": T(lang, "hops"), "nolink": T(lang, "nolink"),
         "unseen": T(lang, "unseen"), "nohelp": T(lang, "nohelp"),
         "throwit": T(lang, "throwit"), "explore": T(lang, "explore"),
-        "seeking": T(lang, "seeking"), "lang": lang,
+        "seeking": T(lang, "seeking"), "held": T(lang, "held"),
+        "copied": T(lang, "copied"), "lang": lang,
     }
+    out = ""
+    og_title, og_desc = "Seed 42", T(lang, "ogdesc")
+    if a and b:
+        r = solve_logged(a, b, lang)
+        out = _render(r, a, b, lang)
+        if r["status"] == "ok":
+            og_title = f'{a} → {b} · {r["hops"]} {T(lang, "hops")}'
+            tk = tier_key(r.get("rarity"))
+            og_desc = ((T(lang, tk) + " — " if tk and tk != "typical" else "")
+                       + " → ".join(r["path"]))
+        else:
+            og_title, og_desc = f"{a} → {b}", T(lang, "nolink")
+    url = (f"{PUBLIC_URL}/path?a={U.quote(a)}&b={U.quote(b)}"
+           if PUBLIC_URL and a and b else PUBLIC_URL)
     body = (f'<h1>{T(lang, "game")}</h1>'
             f'<p class="note">{T(lang, "gsub")}</p>{form}'
             f'<div id="out">{out}</div>'
             f'<script>const L={json.dumps(labels, ensure_ascii=False)};{GAME_JS}</script>')
     return respond_html(T(lang, "game"), body,
                         conn().execute("SELECT COUNT(*) n FROM response WHERE gen_model=?",
-                                       (llm.GEN_MODEL,)).fetchone()["n"], lang)
+                                       (llm.GEN_MODEL,)).fetchone()["n"], lang,
+                        og_tags(og_title, og_desc, url))
 
 
 def _chip(word: str, lang: str, nxt: str | None = None) -> str:
@@ -871,13 +914,19 @@ def tier_key(rar: float | None) -> str | None:
             else "top10" if rar <= 0.10 else "typical")
 
 
-def share_bar(a: str, b: str, hops: int, lang: str) -> str:
+def share_bar(a: str, b: str, hops: int, lang: str,
+              rar: float | None = None) -> str:
     """X·Facebook·LinkedIn 은 웹 인텐트가 있다. 인스타그램은 링크 공유용 웹
     엔드포인트가 없어서 (모바일의 Web Share API 나) 링크 복사로 처리한다."""
     if not PUBLIC_URL:
         return ""
     link = f"{PUBLIC_URL}/path?a={U.quote(a)}&b={U.quote(b)}"
-    txt = f"{a} → {b} : {hops} {T(lang, 'hops')} — Seed 42"
+    # 경로만 적으면 무슨 서비스인지 모른다. 슬로건으로 열고, 희귀한 결과면
+    # 그것을 앞세우고, 마지막에 도전을 건다.
+    tk = tier_key(rar)
+    head = (T(lang, tk) if tk and tk != "typical" else T(lang, "slogan"))
+    txt = (f"{head}\n{a} → {b} : {hops} {T(lang, 'hops')}\n"
+           f"{T(lang, 'chall')} — Seed 42")
     e_l, e_t = U.quote(link, safe=""), U.quote(txt, safe="")
     outs = [
         ("X", f"https://twitter.com/intent/tweet?text={e_t}&url={e_l}"),
@@ -918,7 +967,7 @@ def _render(r: dict, a: str, b: str, lang: str) -> str:
         return (f'<div class="box ok"><p class="big">{r["hops"]} {T(lang, "hops")}'
                 f'{badge}</p>'
                 f'<div class="chain">{chain}</div>{rec}'
-                f'{share_bar(a, b, r["hops"], lang)}</div>')
+                f'{share_bar(a, b, r["hops"], lang, r.get("rarity"))}</div>')
     key = "unseen" if r["status"] == "unseen" else "nolink"
     act = "throwit" if r["status"] == "unseen" else "explore"
     links = " ".join(
