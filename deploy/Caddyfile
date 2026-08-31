@@ -1,7 +1,16 @@
-# Caddy 가 Let's Encrypt 인증서를 자동으로 받고 갱신한다.
-# Cloudflare 프록시(주황 구름)를 켜면 HTTP-01 검증이 가로막히므로
-# 최초 발급 때는 DNS only(회색 구름)여야 한다.
+# 인증서는 DNS-01 로 받는다.
+#
+# HTTP-01 은 Let's Encrypt 가 도메인으로 HTTP 요청을 보내 검증하는데,
+# Cloudflare 프록시(주황 구름)를 켜면 그 요청이 Cloudflare 에서 끊길 수 있다.
+# DNS-01 은 TXT 레코드로 검증하므로 프록시 여부와 무관하게 항상 동작한다.
+#
+# CF_API_TOKEN 은 /opt/seed42/.env 에 있고 systemd 가 주입한다.
+# 토큰 권한은 modoc-ai.com 존의 DNS Edit 뿐이고 VM IP 에서만 쓸 수 있게 묶여 있다.
 seed42.modoc-ai.com {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+		resolvers 1.1.1.1 8.8.8.8
+	}
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:5001
 	log {
