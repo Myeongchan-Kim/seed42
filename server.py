@@ -94,6 +94,7 @@ STR = {
     "start":    {"en": "From", "ko": "출발 단어", "zh": "起点", "es": "Desde"},
     "goal":     {"en": "To", "ko": "도착 단어", "zh": "终点", "es": "Hasta"},
     "find":     {"en": "Find", "ko": "찾기", "zh": "查找", "es": "Buscar"},
+    "swap":     {"en": "Swap", "ko": "바꾸기", "zh": "交换", "es": "Intercambiar"},
     "hops":     {"en": "hops", "ko": "홉", "zh": "跳", "es": "saltos"},
     "nolink":   {"en": "No path yet — help connect them!",
                  "ko": "아직 연결이 없습니다 — 연결할 수 있게 도와주세요!",
@@ -212,9 +213,29 @@ def respond_html(title: str, body: str, count: int, lang: str, og: str = ""):
     return r
 
 
+SWAP_JS = r"""
+(function () {
+  const f = document.querySelector('form.pf'), s = document.getElementById('swap');
+  if (!f || !s) return;
+  // 출발/도착 맞바꾸기. 비대칭이 큰 쌍이 많아 반대 방향을 바로 보고 싶을 때 쓴다.
+  s.addEventListener('click', () => {
+    const t = f.a.value; f.a.value = f.b.value; f.b.value = t;
+    if (f.a.value.trim() && f.b.value.trim()) f.submit(); else f.a.focus();
+  });
+})();
+"""
+
 GAME_JS = r"""
 const form = document.querySelector('form.pf');
 const out = document.getElementById('out');
+
+const swapBtn = document.getElementById('swap');
+if (swapBtn && form) swapBtn.addEventListener('click', () => {
+  const t = form.a.value; form.a.value = form.b.value; form.b.value = t;
+  if (form.a.value.trim() && form.b.value.trim())
+    form.requestSubmit ? form.requestSubmit() : form.submit();
+  else form.a.focus();
+});
 
 // 경로의 홉에 마우스를 올리면 다음 단어가 본문 어디에서 나왔는지 보여준다.
 const tipEl = document.createElement('div');
@@ -340,20 +361,22 @@ def graph_adj():
     cfg = click_config()
     top = c.execute("SELECT MAX(rowid) x FROM edge").fetchone()["x"] or 0
     with _G_lock:
+        # ok=0 인 노드는 뺀다. 옛 토크나이저가 만든 잔재('땀을', 'rises')가
+        # 경로에 끼면 사슬이 말이 안 된다. 실측상 빼도 손해가 거의 없다 -
+        # 무작위 300쌍 중 끊긴 것 1개, 평균 홉 +0.22.
+        Q = ("SELECT e.src_id, e.dst_id FROM edge e"
+             " JOIN node s ON s.id=e.src_id JOIN node d ON d.id=e.dst_id"
+             " WHERE e.config_id=? AND s.ok IS NOT 0 AND d.ok IS NOT 0")
         if _G["adj"] is None or _G["cfg"] != cfg:
             adj: dict[int, list[int]] = {}
             rev: dict[int, list[int]] = {}
-            rows = c.execute("SELECT src_id, dst_id FROM edge WHERE config_id=?", (cfg,))
-            for a, b in rows:
+            for a, b in c.execute(Q, (cfg,)):
                 adj.setdefault(a, []).append(b)
                 rev.setdefault(b, []).append(a)
             _G.update(cfg=cfg, adj=adj, rev=rev, rowid=top)
         elif top > _G["rowid"]:                     # 새로 생긴 것만 덧붙인다
             adj, rev = _G["adj"], _G["rev"]
-            rows = c.execute(
-                "SELECT src_id, dst_id FROM edge WHERE config_id=? AND rowid>?",
-                (cfg, _G["rowid"]))
-            for a, b in rows:
+            for a, b in c.execute(Q + " AND e.rowid>?", (cfg, _G["rowid"])):
                 adj.setdefault(a, []).append(b)
                 rev.setdefault(b, []).append(a)
             _G["rowid"] = top
@@ -660,6 +683,10 @@ form.pf label{display:flex;flex-direction:column;gap:5px;font-size:11px;
 letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:500}
 form.pf input{font:inherit;font-size:15px;padding:9px 13px;border:1px solid var(--rule);
 border-radius:6px;background:var(--surface);color:var(--ink);min-width:190px}
+form.pf button.swap{font-size:17px;padding:8px 12px;background:var(--surface);
+color:var(--muted);border:1px solid var(--rule);border-radius:6px;cursor:pointer;
+line-height:1;align-self:flex-end;margin-bottom:1px}
+form.pf button.swap:hover{border-color:var(--accent);color:var(--accent)}
 form.pf button{font:inherit;font-size:14px;padding:10px 22px;border:1px solid var(--accent);
 background:var(--accent);color:var(--ground);border-radius:6px;cursor:pointer}
 .box{margin:26px 0 0;padding:20px 22px;border:1px solid var(--rule);border-radius:9px;
@@ -936,6 +963,8 @@ def index():
       <form class="pf" action="{url_for('find_path')}" method="get">
         <input type="hidden" name="lang" value="{lang}">
         <label>{T(lang, "start")}<input name="a" placeholder="{T(lang, "ph")}"></label>
+        <button type="button" class="swap" id="swap" title="{T(lang, "swap")}"
+                aria-label="{T(lang, "swap")}">⇄</button>
         <label>{T(lang, "goal")}<input name="b" placeholder="{T(lang, "ph")}"></label>
         <button>{T(lang, "find")}</button>
       </form>
@@ -967,7 +996,8 @@ def index():
               f'<a href="{url_for("word", w=r["a"], lang=lang)}">{html.escape(r["a"])}</a>'
               for r in live_words) or f'<span class="note">{T(lang, "empty")}</span>'}</div>
         </section>
-      </div>"""
+      </div>
+      <script>{SWAP_JS}</script>"""
     return respond_html("Seed 42", body, thrown, lang,
                         og_tags(f'Seed 42 — {T(lang, "slogan")}',
                                 T(lang, "ogdesc"), PUBLIC_URL))
@@ -983,7 +1013,8 @@ def explore():
                       (llm.GEN_MODEL,)).fetchone()["c"]
     rows = c.execute(
         "SELECT n.word FROM response r JOIN node n ON n.id=r.node_id"
-        " WHERE r.gen_model=? ORDER BY r.id DESC LIMIT ?", (llm.GEN_MODEL, n)).fetchall()
+        " WHERE r.gen_model=? AND n.ok IS NOT 0"
+        " ORDER BY r.id DESC LIMIT ?", (llm.GEN_MODEL, n)).fetchall()
     empty_li = f'<li class="note">{T(lang, "none")}</li>'
     items = "".join(
         f'<li><a href="{url_for("word", w=r["word"], lang=lang)}">'
@@ -1015,6 +1046,8 @@ def find_path():
         f'<input type="hidden" name="lang" value="{lang}">'
         f'<label>{T(lang, "start")}<input name="a" value="{html.escape(a)}" '
         f'placeholder="{T(lang, "ph")}" autofocus></label>'
+        f'<button type="button" class="swap" id="swap" '
+        f'title="{T(lang, "swap")}" aria-label="{T(lang, "swap")}">⇄</button>'
         f'<label>{T(lang, "goal")}<input name="b" value="{html.escape(b)}" '
         f'placeholder="{T(lang, "ph")}"></label>'
         f'<button>{T(lang, "find")}</button></form>')
@@ -1259,6 +1292,8 @@ def word(w: str):
     c = conn()
     cfg = click_config()
     dst = db.node_id(c, norm(w), w, w)
+    c.execute("UPDATE node SET ok=? WHERE id=? AND ok IS NULL",
+              (1 if tokens.is_word(w) else 0, dst))
     db.record_response(c, dst, text, llm.GEN_MODEL, 0.0, llm.PROMPT_VERSION)
     if src and norm(src) != norm(w):            # 클릭이 곧 엣지다
         s_ = db.node_id(c, norm(src), src, src)

@@ -35,17 +35,23 @@ _nlp: dict[str, object] = {}
 
 
 def detect(text: str) -> str:
-    """본문의 언어. 문자 빈도로 정한다."""
+    """본문의 언어. 문자 빈도로 정한다.
+
+    절대 개수로 문턱을 두면 짧은 단어에서 무너진다 - '전쟁'(한글 2자)이 문턱을
+    못 넘어 영어로 판정되고, 영어 모델이 아무것도 못 뽑아 멀쩡한 단어가
+    버려졌다. 긴 본문과 단어 하나가 같은 함수를 쓰므로 비율로 판단한다."""
     n = {k: len(r.findall(text)) for k, r in _RE.items()}
-    if n["ko"] > 5:
-        return "ko"
-    if n["ja"] > 5:                       # 가나가 있으면 일본어
+    total = sum(n.values())
+    if not total:
+        return "en"
+    # 가나가 조금이라도 있으면 일본어 (한자는 중국어와 겹쳐 단독으로 못 쓴다)
+    if n["ja"]:
         return "ja"
-    if n["zh"] > 5:
+    if n["ko"] / total > 0.3:
+        return "ko"
+    if n["zh"] / total > 0.3:
         return "zh"
-    if n["en"] > 5:
-        return "es" if len(_ES_HINT.findall(text)) >= 3 else "en"
-    return "en"
+    return "es" if len(_ES_HINT.findall(text)) >= 3 else "en"
 
 
 def _load(lang: str):
@@ -157,10 +163,15 @@ def neighbors(text: str, exclude: str = "", lang: str | None = None) -> list[str
 
 
 def is_word(token: str) -> bool:
-    """단어 하나가 노드가 될 만한가. 시드·클릭 입력을 거르는 데 쓴다."""
+    """단어 하나가 노드가 될 만한가. 시드·클릭·프론티어를 거르는 데 쓴다.
+
+    한 글자도 허용한다 - 본문에서는 '질'·'뇌'가 잡히는데 단어 하나로 물으면
+    거부되면 같은 말이 자리에 따라 다르게 판정된다."""
     t = token.strip()
-    if len(t) < 2 or t.isdigit() or t.lower() in JUNK:
+    if not t or t.isdigit() or t.lower() in JUNK:
         return False
+    if len(t) == 1 and not _RE["ko"].match(t):
+        return False                       # 한글 외 한 글자는 받지 않는다
     return bool(spans(t))
 
 

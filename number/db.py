@@ -44,8 +44,10 @@ CREATE TABLE IF NOT EXISTS node (
   word      TEXT NOT NULL,
   canonical TEXT NOT NULL,
   first_seen TEXT NOT NULL,
-  lang      TEXT              -- ko | en | mix. 정규화하지 않으므로 언어가 갈린다
+  lang      TEXT,             -- ko | en | zh | ja | mix. 정규화하지 않으므로 갈린다
+  ok        INTEGER            -- 1=현 토크나이저가 명사로 인정. 0 이면 표시에서 뺀다
 );
+CREATE INDEX IF NOT EXISTS ix_node_ok ON node(ok);
 CREATE INDEX IF NOT EXISTS ix_node_lang ON node(lang);
 
 -- 그 노드로 관측된 원표기들
@@ -200,6 +202,15 @@ def _add_lang_column(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _add_ok_column(conn: sqlite3.Connection) -> None:
+    """node.ok 를 붙인다. 값 채우기는 mark_ok.py 가 한다 (토크나이저가 필요해서
+    여기서는 못 한다 - db 는 number.tokens 를 import 하지 않는다)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(node)")}
+    if cols and "ok" not in cols:
+        conn.execute("ALTER TABLE node ADD COLUMN ok INTEGER")
+        conn.commit()
+
+
 def _fill_lang(conn: sqlite3.Connection) -> None:
     """표기로 언어를 판정해 채운다. 정규화를 하지 않으므로 언어가 그대로 갈린다."""
     conn.execute("""
@@ -241,7 +252,7 @@ def _upgrade(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # SQLite 는 동시 writer 를 못 견딘다. 모든 쓰기를 하나의 락으로 직렬화한다.
 #
@@ -278,6 +289,7 @@ def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
         _add_lang_column(conn)      # SCHEMA 의 인덱스가 이 컬럼을 참조한다
+        _add_ok_column(conn)
         conn.executescript(SCHEMA)
         _upgrade(conn)
         _repair_fk(conn)
