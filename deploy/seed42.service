@@ -1,0 +1,19 @@
+[Unit]
+Description=Seed 42 web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=seed42
+WorkingDirectory=/opt/seed42
+ExecStart=/opt/seed42/.venv/bin/python /opt/seed42/serve.py
+Restart=always
+RestartSec=5
+# 그래프를 메모리에 올리므로 넉넉히. e2-medium 은 4GB.
+MemoryMax=2500M
+StandardOutput=append:/opt/seed42/logs/web.log
+StandardError=append:/opt/seed42/logs/web.log
+
+[Install]
+WantedBy=multi-user.target

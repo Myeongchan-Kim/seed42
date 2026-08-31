@@ -1,0 +1,13 @@
+[Unit]
+Description=Seed 42 daily crawl
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=seed42
+WorkingDirectory=/opt/seed42
+ExecStart=/opt/seed42/.venv/bin/python /opt/seed42/daily.py --hours 3
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=append:/opt/seed42/logs/daily.log
+StandardError=append:/opt/seed42/logs/daily.log

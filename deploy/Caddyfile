@@ -1,0 +1,11 @@
+# Caddy 가 Let's Encrypt 인증서를 자동으로 받고 갱신한다.
+# Cloudflare 프록시(주황 구름)를 켜면 HTTP-01 검증이 가로막히므로
+# 최초 발급 때는 DNS only(회색 구름)여야 한다.
+seed42.modoc-ai.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:5001
+	log {
+		output file /var/log/caddy/seed42.log
+		format console
+	}
+}
