@@ -165,6 +165,15 @@ STR = {
                  "ko": "아직 없습니다 — {n}홉 넘게 떨어진 쌍을 찾아보세요!",
                  "zh": "还没有这么远的 — 找一对相隔 {n} 跳的词吧！",
                  "es": "Nada tan lejos aún — ¡encuentra un par a {n} saltos!"},
+    "paths":    {"en": "Paths", "ko": "경로 모아보기", "zh": "路径", "es": "Rutas"},
+    "more":     {"en": "See all", "ko": "더보기", "zh": "查看全部", "es": "Ver todo"},
+    "s_far":    {"en": "Farthest", "ko": "가장 먼", "zh": "最远", "es": "Más lejanas"},
+    "s_oneway": {"en": "One-way", "ko": "일방통행", "zh": "单行道", "es": "Un sentido"},
+    "s_open":   {"en": "Unconnected", "ko": "연결 없음", "zh": "未连接",
+                 "es": "Sin conectar"},
+    "s_shared": {"en": "Shared", "ko": "공유됨", "zh": "已分享", "es": "Compartidas"},
+    "s_top":    {"en": "Popular", "ko": "인기", "zh": "热门", "es": "Populares"},
+    "s_recent": {"en": "Recent", "ko": "최근", "zh": "最近", "es": "Recientes"},
     "shared":   {"en": "Most shared", "ko": "많이 공유된 경로",
                  "zh": "分享最多", "es": "Más compartidas"},
     "asym":     {"en": "One-way streets", "ko": "돌아오지 못하는 길",
@@ -648,6 +657,42 @@ def stats_loop() -> None:
         time.sleep(STATS_EVERY)
 
 
+# --------------------------------------------------------------- 경로 목록
+
+# 정렬 방식만 다르고 나머지는 같다. 대시보드는 각 5개를 보여주고 나머지는
+# /paths?sort=... 로 넘긴다.
+SORTS = ("far", "oneway", "open", "shared", "top", "recent")
+
+
+def path_rows(sort: str, limit: int) -> list[dict]:
+    c = conn()
+    if sort == "oneway":
+        return [dict(r) for r in asymmetric_pairs(limit)]
+    if sort == "open":
+        return [dict(r) for r in still_open(limit)]
+    if sort == "far":
+        fth = far_threshold()
+        return [dict(r) for r in c.execute(
+            """SELECT a, b, MIN(hops) h, COUNT(1) c FROM search_log
+               WHERE kind='path' AND status='ok'
+               GROUP BY lower(a), lower(b) HAVING h >= ?
+               ORDER BY h DESC, MAX(id) DESC LIMIT ?""", (fth, limit))]
+    if sort == "shared":
+        return [dict(r) for r in c.execute(
+            """SELECT a, b, COUNT(1) c, MIN(hops) h FROM search_log
+               WHERE kind='share' GROUP BY lower(a), lower(b)
+               ORDER BY c DESC, MAX(id) DESC LIMIT ?""", (limit,))]
+    if sort == "top":
+        return [dict(r) for r in c.execute(
+            """SELECT a, b, COUNT(1) c, MIN(hops) h FROM search_log
+               WHERE kind='path' AND status='ok'
+               GROUP BY lower(a), lower(b) ORDER BY c DESC, h ASC LIMIT ?""",
+            (limit,))]
+    return [dict(r) for r in c.execute(                     # recent
+        """SELECT a, b, status, hops AS h FROM search_log WHERE kind='path'
+           ORDER BY id DESC LIMIT ?""", (limit,))]
+
+
 # ------------------------------------------------------------------- 렌더링
 
 CSS = """
@@ -759,6 +804,15 @@ background:var(--accent-soft);color:var(--accent);white-space:nowrap}
 .pill.big{font-size:13px;padding:3px 11px;font-weight:500}
 ul.rows.far li{padding:10px 0}
 ul.rows.far li a{font-size:15px}
+a.seemore{font-size:11px;color:var(--accent);text-decoration:none;
+letter-spacing:0;text-transform:none;font-weight:400;margin-left:6px}
+a.seemore:hover{text-decoration:underline}
+.tabs{display:flex;gap:5px;flex-wrap:wrap;margin:16px 0 18px}
+.tabs a{font-size:13px;padding:6px 13px;border:1px solid var(--rule);border-radius:99px;
+color:var(--muted);text-decoration:none;background:var(--surface)}
+.tabs a:hover{border-color:var(--accent);color:var(--accent)}
+.tabs a.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);
+font-weight:500}
 a.revlink{color:var(--faint);text-decoration:none;font-size:13px;padding:0 2px}
 a.revlink:hover{color:var(--accent)}
 .cnt{font-family:var(--mono);font-size:11px;color:var(--faint);min-width:20px;
@@ -927,29 +981,22 @@ def index():
                       (cfg,)).fetchone()["n"]
 
     # 가장 많이 찾은 쌍. 경로가 있는 것만 - 없는 쌍은 아래 '연결해 주세요' 로 간다.
-    top = q("""SELECT a, b, COUNT(*) c, MIN(hops) h FROM search_log
-               WHERE kind='path' AND status='ok'
-               GROUP BY lower(a), lower(b) ORDER BY c DESC, h ASC LIMIT 10""")
+    top = path_rows("top", 5)
     # 가장 멀리 떨어진 쌍. 인기는 '무엇이 궁금했나'지만 거리는 '그래프가 어떻게
     # 생겼나'라서, 니치한 대상이나 언어를 건너는 경로가 여기 올라온다.
     # 흔한 거리는 올리지 않는다. 분포에서 상위 10% 컷을 뽑아 그 이상만 본다.
     # 그중 20개를 모아 무작위 5개 - 전부 보여주면 매번 같아 다시 볼 이유가 없다.
     fth = far_threshold()
-    far = q("""SELECT a, b, MIN(hops) h FROM search_log
-               WHERE kind='path' AND status='ok'
-               GROUP BY lower(a), lower(b) HAVING h >= ?
-               ORDER BY h DESC LIMIT 20""", fth)
+    # 상위 20 중 무작위 5개. 전부 보여주면 매번 같은 목록이라 다시 볼 이유가 없다.
+    far = path_rows("far", 20)
     far = random.sample(far, min(5, len(far)))
     far.sort(key=lambda r: -r["h"])
-    asym = asymmetric_pairs(6)
-    shared = q("""SELECT a, b, COUNT(*) c, MIN(hops) h FROM search_log
-                  WHERE kind='share' GROUP BY lower(a), lower(b)
-                  ORDER BY c DESC, MAX(id) DESC LIMIT 6""")
-    open_pairs = still_open(6)
+    asym = asymmetric_pairs(5)
+    shared = path_rows("shared", 5)
+    open_pairs = still_open(5)
     live_words = q("""SELECT a, COUNT(*) c FROM search_log WHERE kind='word'
                       GROUP BY lower(a) ORDER BY MAX(id) DESC LIMIT 18""")
-    live_pairs = q("""SELECT a, b, status, hops FROM search_log WHERE kind='path'
-                      ORDER BY id DESC LIMIT 10""")
+    live_pairs = path_rows("recent", 5)
 
     def pathrow(r):
         badge = f'<span class="pill">{r["h"]} {T(lang, "hops")}</span>'
@@ -958,6 +1005,10 @@ def index():
                 f'{html.escape(r["a"])} <span class="arr">→</span> '
                 f'{html.escape(r["b"])}</a>{badge}'
                 f'<span class="cnt">{r["c"]}</span></li>')
+
+    def seemore(sort):
+        return (f' <a class="seemore" href="{url_for("paths", sort=sort, lang=lang)}">'
+                f'{T(lang, "more")} →</a>')
 
     def hoprow(r, big=False):
         cls = "pill big" if big else "pill"
@@ -988,7 +1039,7 @@ def index():
 
     def liverow(r):
         st = r["status"]
-        tag = (f'<span class="pill">{r["hops"]} {T(lang, "hops")}</span>'
+        tag = (f'<span class="pill">{r["h"]} {T(lang, "hops")}</span>'
                if st == "ok" else '<span class="pill warn">·</span>')
         link = url_for("find_path", a=r["a"], b=r["b"], lang=lang)
         return (f'<li><a href="{html.escape(link)}">{html.escape(r["a"])} '
@@ -1013,21 +1064,21 @@ def index():
       </div>
       <div class="cols">
         <section>
-          <p class="lbl">{T(lang, "farthest")} · {fth}+ {T(lang, "hops")}</p>
+          <p class="lbl">{T(lang, "farthest")}{seemore("far")} · {fth}+ {T(lang, "hops")}</p>
           <ul class="rows far">{"".join(hoprow(r, True) for r in far)
               or f'<li class="note">{T(lang, "nofar").format(n=fth)}</li>'}</ul>
-          {'<p class="lbl">' + T(lang, "asym") + '</p>'
+          {'<p class="lbl">' + T(lang, "asym") + seemore("oneway") + '</p>'
            '<p class="note">' + T(lang, "asymsub") + '</p><ul class="rows">'
            + "".join(asymrow(r) for r in asym) + '</ul>' if asym else ''}
         </section>
         <section>
-          {'<p class="lbl">' + T(lang, "nolink").split("—")[0].strip() + '</p><ul class="rows">'
+          {'<p class="lbl">' + T(lang, "nolink").split("—")[0].strip() + seemore("open") + '</p><ul class="rows">'
            + "".join(openrow(r) for r in open_pairs) + '</ul>' if open_pairs else ''}
-          {'<p class="lbl">' + T(lang, "shared") + '</p><ul class="rows">'
+          {'<p class="lbl">' + T(lang, "shared") + seemore("shared") + '</p><ul class="rows">'
            + "".join(pathrow(r) for r in shared) + '</ul>' if shared else ''}
-          <p class="lbl">{T(lang, "toppath")}</p>
+          <p class="lbl">{T(lang, "toppath")}{seemore("top")}</p>
           <ul class="rows">{"".join(pathrow(r) for r in top) or empty}</ul>
-          <p class="lbl">{T(lang, "livepairs")}</p>
+          <p class="lbl">{T(lang, "livepairs")}{seemore("recent")}</p>
           <ul class="rows">{"".join(liverow(r) for r in live_pairs) or empty}</ul>
           <p class="lbl">{T(lang, "livewords")}</p>
           <div class="tags">{"".join(
@@ -1039,6 +1090,52 @@ def index():
     return respond_html("Seed 42", body, thrown, lang,
                         og_tags(f'Seed 42 — {T(lang, "slogan")}',
                                 T(lang, "ogdesc"), PUBLIC_URL))
+
+
+@app.get("/paths")
+def paths():
+    """경로 목록. 정렬 방식만 다르고 화면은 같다."""
+    lang = pick_lang()
+    sort = request.args.get("sort", "far")
+    if sort not in SORTS:
+        sort = "far"
+    n = max(5, min(request.args.get("n", 50, type=int), 300))
+    rows = path_rows(sort, n)
+
+    tabs = "".join(
+        f'<a class="tab{" on" if k == sort else ""}" '
+        f'href="{url_for("paths", sort=k, lang=lang)}">{T(lang, "s_" + k)}</a>'
+        for k in SORTS)
+
+    def row(r):
+        link = url_for("find_path", a=r["a"], b=r["b"], lang=lang)
+        rev = url_for("find_path", a=r["b"], b=r["a"], lang=lang)
+        bits = ""
+        if sort == "oneway":
+            back = r.get("back")
+            bits = (f'<span class="pill">{r["fwd"]}</span>'
+                    f'<a class="revlink" href="{html.escape(rev)}">↩</a>'
+                    + (f'<span class="pill warn">{T(lang, "unreach")}</span>'
+                       if back is None else f'<span class="pill">{back}</span>'))
+        elif sort == "open":
+            bits = f'<span class="pill warn">{T(lang, "unreach")}</span>'
+        else:
+            if r.get("h") is not None:
+                bits += f'<span class="pill">{r["h"]} {T(lang, "hops")}</span>'
+            if r.get("c"):
+                bits += f'<span class="cnt">{r["c"]}</span>'
+        return (f'<li><a href="{html.escape(link)}">{html.escape(r["a"])} '
+                f'<span class="arr">→</span> {html.escape(r["b"])}</a>{bits}</li>')
+
+    more = ""
+    if len(rows) >= n < 300:
+        more = (f'<p class="more"><a href="{url_for("paths", sort=sort, n=n + 50, lang=lang)}">'
+                f'Load more</a></p>')
+    items = "".join(row(r) for r in rows) or '<li class="note">-</li>'
+    body = (f'<h1>{T(lang, "paths")}</h1>'
+            f'<nav class="tabs">{tabs}</nav>'
+            f'<ul class="rows">{items}</ul>{more}')
+    return respond_html(T(lang, "paths"), body, len(rows), lang)
 
 
 @app.get("/explore")
