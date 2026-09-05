@@ -108,6 +108,10 @@ STR = {
                  "zh": "从两边点击词语走走看。每一次点击都会添加一条边，路径可能就出现了。",
                  "es": "Haz clic en palabras desde ambos lados. Cada clic añade una arista "
                        "y el camino puede aparecer."},
+    "badword":  {"en": "One word or one name, please — not a sentence",
+                 "ko": "문장 말고 단어 하나(또는 이름 하나)를 넣어주세요",
+                 "zh": "请输入一个词或一个名称，而不是句子",
+                 "es": "Una palabra o un nombre, no una frase"},
     "unseen":   {"en": "not thrown yet", "ko": "아직 던져본 적 없는 단어",
                  "zh": "还没有投出过", "es": "aún no lanzada"},
     "throwit":  {"en": "Throw it first", "ko": "먼저 던져보기",
@@ -429,18 +433,22 @@ def _join(fp, bp, u, v):
     return left[::-1] + right
 
 
-# 무거운 통계는 시간 기준으로 캐싱한다. 그래프 버전으로 걸면 크롤이 도는 동안
-# 매 요청마다 무효화되어 500쌍 BFS 를 다시 돌린다 (대시보드가 15초까지 늘었다).
-STATS_TTL = 300.0
+# 무거운 통계는 백그라운드에서만 계산한다. 요청 중에 계산하면 캐시가 만료된
+# 그 한 번의 요청이 전부를 뒤집어쓴다 - 대시보드 한 번이 BFS 를 880회 돌려
+# 20초, 심하면 Cloudflare 100초 한도를 넘겨 524 가 났다.
+# 요청은 마지막으로 계산된 값을 그냥 읽는다. 없으면 없는 대로 보여준다.
+STATS_EVERY = 600.0        # 백그라운드 재계산 주기
+DIST_SAMPLE = 150          # 홉 분포 표본. 그래프가 커져 500 은 비싸다
+ASYM_SCAN = 40             # 비대칭을 볼 쌍 수
 
 _DIST: dict = {"at": 0.0, "vals": []}
 
 
-def hop_distribution(n: int = 500) -> list[int]:
+def hop_distribution(n: int = DIST_SAMPLE, compute: bool = False) -> list[int]:
     """무작위 쌍의 홉 분포. 백분위를 진짜 수치로 말하기 위한 것.
     그래프가 자라면 분포가 변하므로 하드코딩하지 않고 다시 잰다 (600쌍에 1초)."""
-    if _DIST["vals"] and time.time() - _DIST["at"] < STATS_TTL:
-        return _DIST["vals"]
+    if not compute:
+        return _DIST["vals"]               # 요청은 마지막 값만 읽는다
     adj, rev = graph_adj()
     pool = list(adj.keys())
     if len(pool) < 50:
@@ -464,7 +472,7 @@ def far_threshold(p: float = 0.10) -> int:
     5홉짜리는 자랑거리가 못 된다 - 절반 가까이가 그만큼 떨어져 있다."""
     vals = hop_distribution()
     if not vals:
-        return 6
+        return 6                           # 아직 계산 전 - 기본값
     n = len(vals)
     for h in sorted(set(vals)):
         if sum(1 for v in vals if v >= h) / n <= p:
@@ -475,10 +483,10 @@ def far_threshold(p: float = 0.10) -> int:
 _OPEN: dict = {"at": 0.0, "rows": []}
 
 
-def still_open(limit: int = 6) -> list[dict]:
+def still_open(limit: int = 6, compute: bool = False) -> list[dict]:
     """아직 이어지지 않은 쌍. 기록만 보면 안 되고 지금 다시 풀어봐야 한다 -
     그래프가 자라 이미 이어진 쌍을 '도와주세요' 로 계속 보여주고 있었다."""
-    if _OPEN["rows"] and time.time() - _OPEN["at"] < STATS_TTL:
+    if not compute:
         return _OPEN["rows"][:limit]
     c = conn()
     adj, rev = graph_adj()
@@ -486,7 +494,7 @@ def still_open(limit: int = 6) -> list[dict]:
     for r in c.execute("""SELECT a, b, COUNT(*) c FROM search_log
                           WHERE kind='path' AND status<>'ok'
                           GROUP BY lower(a), lower(b)
-                          ORDER BY c DESC, MAX(id) DESC LIMIT 80"""):
+                          ORDER BY c DESC, MAX(id) DESC LIMIT ?""", (ASYM_SCAN,)):
         k = (r["a"].lower(), r["b"].lower())
         if k in seen:
             continue
@@ -502,19 +510,19 @@ def still_open(limit: int = 6) -> list[dict]:
 _ASYM: dict = {"at": 0.0, "rows": []}
 
 
-def asymmetric_pairs(limit: int = 6) -> list[dict]:
+def asymmetric_pairs(limit: int = 6, compute: bool = False) -> list[dict]:
     """A→B 는 가까운데 B→A 는 멀거나 아예 없는 쌍.
 
     상호성이 0.068 이라 대부분의 연상은 일방통행이다. 그 성질이 눈에 보이게
     한다. 사람들이 실제로 찾아본 쌍만 대상으로 하고, 반대 방향은 여기서 푼다."""
-    if _ASYM["rows"] and time.time() - _ASYM["at"] < STATS_TTL:
+    if not compute:
         return _ASYM["rows"][:limit]
     c = conn()
     adj, rev = graph_adj()
     seen, out = set(), []
     for r in c.execute("""SELECT a, b FROM search_log WHERE kind='path'
                           AND status='ok' GROUP BY lower(a), lower(b)
-                          ORDER BY MAX(id) DESC LIMIT 150"""):
+                          ORDER BY MAX(id) DESC LIMIT ?""", (ASYM_SCAN,)):
         a, b = r["a"], r["b"]
         k = tuple(sorted((a.lower(), b.lower())))
         if k in seen:
@@ -549,6 +557,18 @@ def node_of(word: str):
     r = conn().execute("SELECT id FROM node WHERE lower(word)=lower(?)",
                        (word.strip(),)).fetchone()
     return r["id"] if r else None
+
+
+def mentions(src: str, dst: str) -> bool:
+    """src 의 응답이 실제로 dst 를 언급하는가. 클릭 엣지를 남기기 전에 확인한다."""
+    r = conn().execute(
+        "SELECT r.text FROM response r JOIN node n ON n.id=r.node_id"
+        " WHERE lower(n.word)=lower(?) AND r.gen_model=? LIMIT 1",
+        (src.strip(), llm.GEN_MODEL)).fetchone()
+    if not r:
+        return False
+    d = norm(dst)
+    return any(norm(w) == d for w in tokens.neighbors(r["text"]))
 
 
 def has_response(word: str) -> bool:
@@ -609,6 +629,23 @@ def merge_known(text: str, spans: list) -> list:
             out.append((a, b, w))
             last = b
     return out
+
+
+def refresh_stats() -> None:
+    """백그라운드에서만 부른다. 요청 경로는 compute=False 로 읽기만 한다."""
+    hop_distribution(compute=True)
+    asymmetric_pairs(50, compute=True)
+    still_open(50, compute=True)
+
+
+def stats_loop() -> None:
+    while True:
+        try:
+            graph_adj()
+            refresh_stats()
+        except Exception as e:                      # 통계가 죽어도 사이트는 산다
+            print(f"[stats] {e}", flush=True)
+        time.sleep(STATS_EVERY)
 
 
 # ------------------------------------------------------------------- 렌더링
@@ -1092,6 +1129,11 @@ def _chip(word: str, lang: str, nxt: str | None = None) -> str:
 
 def solve(a: str, b: str, lang: str | None = None) -> dict:
     """길찾기 결과를 자료로 돌려준다. HTML 과 JSON 이 같은 로직을 쓰도록."""
+    # 문장은 노드가 될 수 없다. 검증을 여기서 막지 않으면 'I love MC' 가
+    # unseen 으로 안내되고, 사용자가 그 안내를 따라가면 노드가 만들어진다.
+    bad = [w for w in (a, b) if not tokens.is_query(w) and not has_response(w)]
+    if bad:
+        return {"status": "badword", "missing": bad}
     missing = [w for w in (a, b) if not has_response(w)]
     if missing:
         return {"status": "unseen", "missing": missing}
@@ -1183,7 +1225,8 @@ def _render(r: dict, a: str, b: str, lang: str) -> str:
                 f'{badge}</p>'
                 f'<div class="chain">{chain}</div>{rec}'
                 f'{share_bar(a, b, r["hops"], lang, r.get("rarity"))}</div>')
-    key = "unseen" if r["status"] == "unseen" else "nolink"
+    key = ("badword" if r["status"] == "badword"
+           else "unseen" if r["status"] == "unseen" else "nolink")
     act = "throwit" if r["status"] == "unseen" else "explore"
     links = " ".join(
         f'<a class="cta" href="{url_for("word", w=w, lang=lang)}">'
@@ -1287,6 +1330,14 @@ def word(w: str):
     w = clean(w).strip()
     if not w:
         return redirect("/")
+    # 검증을 통과한 것만 LLM 에 던진다. 안 그러면 'I love MC' 같은 문장이
+    # 그대로 노드가 되어 그래프와 대시보드를 오염시킨다.
+    if not tokens.is_query(w) and not has_response(w):
+        body = (f'<h1>{html.escape(w)}</h1>'
+                f'<div class="box warn"><p class="big">{T(lang, "badword")}</p>'
+                f'<div class="ctas"><a class="cta" href="{url_for("explore", lang=lang)}">'
+                f'{T(lang, "explore")}</a></div></div>')
+        return respond_html(w, body, 0, lang)
     src = request.args.get("from", "")
 
     text = llm.respond(w)                       # 캐시에 없으면 여기서 실제 호출
@@ -1296,7 +1347,10 @@ def word(w: str):
     c.execute("UPDATE node SET ok=? WHERE id=? AND ok IS NULL",
               (1 if tokens.is_word(w) else 0, dst))
     db.record_response(c, dst, text, llm.GEN_MODEL, 0.0, llm.PROMPT_VERSION)
-    if src and norm(src) != norm(w):            # 클릭이 곧 엣지다
+    # 클릭이 곧 엣지다. 다만 from 은 사용자가 URL 로 아무 값이나 줄 수 있으므로
+    # 반드시 확인한다 - 검증이 없으면 /w/베르세르크?from=TCA%20cycle 한 줄로
+    # 임의의 두 단어를 1홉으로 이어붙일 수 있다 (실제로 8홉 -> 1홉이 됐다).
+    if src and norm(src) != norm(w) and mentions(src, w):
         s_ = db.node_id(c, norm(src), src, src)
         db.record_edges(c, cfg, s_, [dst], None)
 

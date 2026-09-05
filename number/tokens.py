@@ -162,17 +162,35 @@ def neighbors(text: str, exclude: str = "", lang: str | None = None) -> list[str
     return out
 
 
+_ACRONYM = re.compile(r"^[A-Z][A-Z0-9]{1,7}$")
+# 약어 예외가 'THE'·'AND' 를 통과시키지 않도록. JUNK 는 소문자 비교라 놓친다.
+STOP_LOWER = {w.lower() for w in JUNK} | {
+    "the", "and", "for", "but", "not", "you", "all", "any", "was", "are",
+    "his", "her", "its", "our", "who", "why", "how", "one", "two", "new",
+}
+
+
 def is_word(token: str) -> bool:
     """단어 하나가 노드가 될 만한가. 시드·클릭·프론티어를 거르는 데 쓴다.
 
     한 글자도 허용한다 - 본문에서는 '질'·'뇌'가 잡히는데 단어 하나로 물으면
-    거부되면 같은 말이 자리에 따라 다르게 판정된다."""
+    거부되면 같은 말이 자리에 따라 다르게 판정된다.
+
+    대문자 약어는 태거를 거치지 않는다. 문맥 없이 단어 하나만 주면 품사 판정이
+    불안정해서, spaCy 가 'FPS' 를 동사로 태깅해 멀쩡한 노드(진입 276·나감 475)가
+    경로에서 통째로 빠졌다. ATP·DNA·CPU 는 명사로 잡히는데 FPS 만 어긋나는 식이라
+    규칙으로 못 맞춘다."""
     t = token.strip()
     if not t or t.isdigit() or t.lower() in JUNK:
         return False
+    if _ACRONYM.match(t) and t.lower() not in STOP_LOWER:
+        return True
     if len(t) == 1 and not _RE["ko"].match(t):
         return False                       # 한글 외 한 글자는 받지 않는다
-    return bool(spans(t))
+    # 입력 *전체* 가 한 단어여야 한다. spans 가 비지 않았다는 것만 보면
+    # 'I love MC' 처럼 문장 안의 명사 하나('MC')를 찾아 통과시켜 버린다.
+    sp = spans(t)
+    return len(sp) == 1 and sp[0][0] == 0 and sp[0][1] == len(t)
 
 
 def clean(token: str) -> str:
@@ -186,3 +204,27 @@ _NORM = re.compile(r"[\s\-_·]+")
 def norm(w: str) -> str:
     """노드 키. 표기 흔들림(공백·하이픈)만 없앤다."""
     return _NORM.sub("", w.strip().lower())
+
+
+_NAME = re.compile(r"^[A-Z][a-z]+(?:[ '-][A-Z][a-z]+){1,2}$")
+
+
+def is_query(text: str) -> bool:
+    """사용자가 친 것이 '단어 하나'로 받을 만한가.
+
+    띄어쓰기를 막을 수는 없다 - 'black hole'·'citric acid cycle' 은 받아야 한다.
+    기준은 입력 전체가 명사구 하나냐다. 'I love MC'(22% 덮임)나
+    '이거 진짜 재밌다'(0%)는 걸러지고 'black hole'(100%)은 통과한다.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 40:
+        return False
+    if is_word(t):                          # 약어·한 단어는 여기서 끝
+        return True
+    if _NAME.match(t):                      # 'Dolly Parton' - 태거가 성만 잡는다
+        return True
+    sp = spans(t)
+    if len(sp) != 1:
+        return False
+    a, b, _ = sp[0]
+    return (b - a) / len(t) >= 0.8

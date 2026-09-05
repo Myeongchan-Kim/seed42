@@ -11,8 +11,9 @@ from waitress import serve
 
 import server
 
-# 첫 요청이 몇 초 걸리는 것을 없앤다. 백그라운드로 그래프를 미리 올린다.
-threading.Thread(target=server.graph_adj, daemon=True).start()
+# 그래프 적재와 통계 계산을 백그라운드로 돌린다. 요청 중에 하면 그 한 번이
+# 전부를 뒤집어쓴다 (대시보드 20초, 심하면 Cloudflare 524).
+threading.Thread(target=server.stats_loop, daemon=True).start()
 
 if __name__ == "__main__":
     serve(server.app, host="127.0.0.1", port=5001, threads=8,
