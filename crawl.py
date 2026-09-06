@@ -23,7 +23,30 @@ from number.tokens import norm
 
 STOP = threading.Event()
 _lock = threading.Lock()
-_stat = {"done": 0, "new": 0, "fail": 0, "cached": 0}
+
+# WAL 을 비우는 주기(초). 단어 수로 세면 배치가 짧을 때 한 번도 안 걸린다 -
+# 300단어 기준으로 뒀더니 254단어 배치에서 안 걸려 WAL 이 494MB 까지 자랐다.
+# 단어 하나가 WAL 을 ~2MB 씩 키우므로 자주 밀어야 한다.
+CHECKPOINT_SEC = 45.0
+_stat = {"done": 0, "new": 0, "fail": 0, "cached": 0, "ckpt_at": 0.0,
+         "wal_mb": 0.0}
+
+
+def checkpoint_now() -> None:
+    """WAL 을 본 DB 에 반영하고 비운다. 실패해도 크롤을 멈추지 않는다.
+
+    읽는 쪽(웹서버)이 붙어 있으면 TRUNCATE 는 busy 로 되돌아온다. 그때는
+    PASSIVE 로라도 밀어 둔다 - 되는 만큼만 반영해도 무한정 자라는 것은 막는다."""
+    try:
+        conn = llm.conn()
+        r = db.checkpoint(conn, "TRUNCATE")
+        if r and r[0]:                              # busy -> 되는 만큼만
+            r = db.checkpoint(conn, "PASSIVE")
+        pages = db.wal_pages(conn)
+        with _lock:
+            _stat["wal_mb"] = pages * 4096 / 1024 / 1024
+    except Exception as e:
+        print(f"  [체크포인트] {str(e)[:70]}", file=sys.stderr, flush=True)
 
 
 def click_config(conn) -> int:
@@ -88,9 +111,15 @@ def work(word: str) -> None:
     for attempt in range(3):
         try:
             new = visit(word)
+            now = time.time()
             with _lock:
                 _stat["done"] += 1
                 _stat["new"] += new
+                due = now - _stat["ckpt_at"] > CHECKPOINT_SEC
+                if due:
+                    _stat["ckpt_at"] = now
+            if due:
+                checkpoint_now()
             return
         except Exception as e:
             if attempt == 2 or STOP.is_set():
@@ -182,8 +211,8 @@ def main() -> None:
                     rate = d / el if el else 0
                     rem = (deadline - time.time()) / 60 if deadline else 0
                     print(f"  [{time.strftime('%H:%M:%S')}] {d}/{total}  "
-                          f"이웃 {_stat['new']:,}  캐시 {_stat['cached']}  "
-                          f"실패 {_stat['fail']}  {rate:.2f}/s  "
+                          f"이웃 {_stat['new']:,}  실패 {_stat['fail']}  "
+                          f"{rate:.2f}/s  WAL {_stat['wal_mb']:.0f}MB  "
                           f"남은 {rem:.0f}분", flush=True)
                     last = d
                 if STOP.is_set():
@@ -200,6 +229,7 @@ def main() -> None:
         if not todo:
             print("  프론티어가 비었다.", flush=True)
 
+    checkpoint_now()                            # 끝낼 때 한 번 더 비운다
     el = time.time() - t0
     print(f"\n  {_stat['done']}단어 완료 ({round_no}회차)  이웃 {_stat['new']:,}  "
           f"실패 {_stat['fail']}  {el/60:.1f}분  ({_stat['done']/el:.2f}/s)")

@@ -648,12 +648,23 @@ def refresh_stats() -> None:
 
 
 def stats_loop() -> None:
+    """통계 갱신과 WAL 정리를 함께 맡는다.
+
+    크롤이 안 도는 동안에도 사람들의 클릭이 WAL 을 키운다. 읽는 쪽이 계속 붙어
+    있으면 체크포인트가 굶어 무한정 자라므로(실측 7.7GB) 여기서 주기적으로 민다.
+    TRUNCATE 는 읽는 연결이 있으면 실패하니 PASSIVE 로 되는 만큼만 반영한다."""
     while True:
         try:
             graph_adj()
             refresh_stats()
         except Exception as e:                      # 통계가 죽어도 사이트는 산다
             print(f"[stats] {e}", flush=True)
+        try:
+            n = db.wal_pages(conn())
+            if n > 20000:                           # 약 80MB 넘으면 알린다
+                print(f"[wal] {n} pages", flush=True)
+        except Exception as e:
+            print(f"[wal] {e}", flush=True)
         time.sleep(STATS_EVERY)
 
 

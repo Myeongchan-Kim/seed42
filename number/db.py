@@ -478,3 +478,26 @@ def put_record(conn, pair: str, a: str, b: str, hops: int, path_json: str,
 
 
 put_record = _serialized(put_record)
+
+
+def checkpoint(conn: sqlite3.Connection, mode: str = "TRUNCATE") -> tuple:
+    """WAL 을 본 DB 에 반영하고 비운다.
+
+    WAL 모드는 읽기와 쓰기가 서로 막지 않아 좋지만, 체크포인트는 '가장 오래된
+    읽기 스냅샷'까지만 반영할 수 있다. 웹서버가 계속 읽으면 그 지점이 앞으로
+    나가지 않아 WAL 이 잘리지 않는다. 실제로 본 DB 1.6GB 에 WAL 7.7GB 까지
+    자랐고, 모든 읽기가 그것을 훑느라 사이트가 죽었다.
+
+    그래서 쓰는 쪽(크롤러)이 주기적으로 직접 부른다. 읽는 쪽이 붙어 있으면
+    PASSIVE 로 되는 만큼만 반영되고, 그것만으로도 무한정 자라는 것은 막는다.
+    """
+    with WRITE:
+        return conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+
+
+def wal_pages(conn: sqlite3.Connection) -> int:
+    """WAL 에 쌓인 페이지 수. 크기 감시용."""
+    try:
+        return conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()[1]
+    except Exception:
+        return -1
