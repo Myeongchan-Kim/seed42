@@ -904,8 +904,11 @@ def page(title: str, body: str, count: int, lang: str = "en",
         for code, name in LANGS.items())
     return (f"{HEAD}<title>{html.escape(title)}</title>{og}"
             f'<header><a class="home" href="/">Seed 42</a>'
-            f'<a class="navlink" href="{url_for("find_path", lang=lang)}">'
-            f'{T(lang, "game")}</a>'
+            # 길찾기 폼은 대시보드(/)에 이미 있어 헤더 버튼은 중복이다.
+            # 대신 /paths 를 둔다 - 대시보드의 '더보기' 로만 갈 수 있어
+            # 다른 페이지에서는 접근할 길이 없었다.
+            f'<a class="navlink" href="{url_for("paths", lang=lang)}">'
+            f'{T(lang, "paths")}</a>'
             f'<a class="navlink" href="{url_for("explore", lang=lang)}">'
             f'{T(lang, "explore")}</a>'
             f'<span class="sub">{llm.GEN_MODEL} · seed {llm.SEED} · '
