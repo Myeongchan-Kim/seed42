@@ -223,8 +223,12 @@ def is_query(text: str) -> bool:
         return True
     if _NAME.match(t):                      # 'Dolly Parton' - 태거가 성만 잡는다
         return True
+    # 구간이 하나여야 한다고 두면 인명이 걸린다 - 형태소 분석기가
+    # '일론 머스크' 를 '일론'+'머스크' 로, '김명찬' 을 '김'+'명'+'찬' 으로 쪼갠다.
+    # 미등록 고유명사라 어쩔 수 없다. 대신 덮임 비율로 본다: 입력의 대부분이
+    # 명사로 덮이면 명사구 하나로 친다 ('I love MC' 는 22% 라 여전히 걸린다).
     sp = spans(t)
-    if len(sp) != 1:
+    if not sp or len(sp) > 4:
         return False
-    a, b, _ = sp[0]
-    return (b - a) / len(t) >= 0.8
+    covered = sum(b - a for a, b, _ in sp)
+    return covered / len(t) >= 0.75

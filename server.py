@@ -168,6 +168,14 @@ STR = {
     "paths":    {"en": "Paths", "ko": "경로 모아보기", "zh": "路径", "es": "Rutas"},
     "more":     {"en": "See all", "ko": "더보기", "zh": "查看全部", "es": "Ver todo"},
     "s_far":    {"en": "Farthest", "ko": "가장 먼", "zh": "最远", "es": "Más lejanas"},
+    "s_far_en": {"en": "Farthest (English)", "ko": "영어끼리 가장 먼",
+                 "zh": "最远（英文）", "es": "Más lejanas (inglés)"},
+    "faren":    {"en": "Farthest, English only", "ko": "영어끼리 가장 먼 경로",
+                 "zh": "最远的英文词对", "es": "Más lejanas solo en inglés"},
+    "farensub": {"en": "Both ends English — the path may still cross languages",
+                 "ko": "양 끝이 영어인 쌍. 경로는 다른 언어를 지날 수 있다",
+                 "zh": "两端都是英文 — 路径仍可能跨语言",
+                 "es": "Ambos extremos en inglés — el camino puede cruzar idiomas"},
     "s_oneway": {"en": "One-way", "ko": "일방통행", "zh": "单行道", "es": "Un sentido"},
     "s_open":   {"en": "Unconnected", "ko": "연결 없음", "zh": "未连接",
                  "es": "Sin conectar"},
@@ -672,7 +680,22 @@ def stats_loop() -> None:
 
 # 정렬 방식만 다르고 나머지는 같다. 대시보드는 각 5개를 보여주고 나머지는
 # /paths?sort=... 로 넘긴다.
-SORTS = ("far", "oneway", "open", "shared", "top", "recent")
+SORTS = ("far", "far_en", "oneway", "open", "shared", "top", "recent")
+
+
+_LANG_CACHE: dict[str, str] = {}
+
+
+def is_en(word: str) -> bool:
+    """이 단어가 영어 노드인가. key 로 조회한다 - node.key 에는 UNIQUE 인덱스가
+    있어 즉시 찾지만, word 로 lower() JOIN 하면 전체 스캔이 된다."""
+    k = norm(word)
+    v = _LANG_CACHE.get(k)
+    if v is None:
+        r = conn().execute("SELECT lang FROM node WHERE key=?", (k,)).fetchone()
+        v = (r["lang"] if r and r["lang"] else "?")
+        _LANG_CACHE[k] = v
+    return v == "en"
 
 
 def path_rows(sort: str, limit: int) -> list[dict]:
@@ -681,6 +704,24 @@ def path_rows(sort: str, limit: int) -> list[dict]:
         return [dict(r) for r in asymmetric_pairs(limit)]
     if sort == "open":
         return [dict(r) for r in still_open(limit)]
+    if sort == "far_en":
+        # 양 끝이 모두 영어인 쌍. 경로 자체는 언어를 건널 수 있다.
+        #
+        # node.word 로 JOIN 하면 안 된다. 그 컬럼에 인덱스가 없고 lower() 를
+        # 씌우면 있어도 못 쓴다 - 83만 행 전체 스캔이라 쿼리 하나가 418초 걸려
+        # 대시보드가 통째로 멈췄다. 먼저 후보를 뽑고 파이썬에서 거른다.
+        rows = c.execute(
+            """SELECT a, b, MIN(hops) h, COUNT(1) c FROM search_log
+               WHERE kind='path' AND status='ok'
+               GROUP BY lower(a), lower(b) ORDER BY h DESC, MAX(id) DESC
+               LIMIT 300""").fetchall()
+        out = []
+        for r in rows:
+            if is_en(r["a"]) and is_en(r["b"]):
+                out.append(dict(r))
+                if len(out) >= limit:
+                    break
+        return out
     if sort == "far":
         fth = far_threshold()
         return [dict(r) for r in c.execute(
@@ -1006,6 +1047,7 @@ def index():
     far = random.sample(far, min(5, len(far)))
     far.sort(key=lambda r: -r["h"])
     asym = asymmetric_pairs(5)
+    far_en = path_rows("far_en", 5)
     shared = path_rows("shared", 5)
     open_pairs = still_open(5)
     live_words = q("""SELECT a, COUNT(*) c FROM search_log WHERE kind='word'
@@ -1081,23 +1123,26 @@ def index():
           <p class="lbl">{T(lang, "farthest")}{seemore("far")} · {fth}+ {T(lang, "hops")}</p>
           <ul class="rows far">{"".join(hoprow(r, True) for r in far)
               or f'<li class="note">{T(lang, "nofar").format(n=fth)}</li>'}</ul>
+          {'<p class="lbl">' + T(lang, "faren") + seemore("far_en") + '</p>'
+           '<p class="note">' + T(lang, "farensub") + '</p><ul class="rows">'
+           + "".join(hoprow(r) for r in far_en) + '</ul>' if far_en else ''}
+          <p class="lbl">{T(lang, "livepairs")}{seemore("recent")}</p>
+          <ul class="rows">{"".join(liverow(r) for r in live_pairs) or empty}</ul>
+        </section>
+        <section>
           {'<p class="lbl">' + T(lang, "asym") + seemore("oneway") + '</p>'
            '<p class="note">' + T(lang, "asymsub") + '</p><ul class="rows">'
            + "".join(asymrow(r) for r in asym) + '</ul>' if asym else ''}
-        </section>
-        <section>
           {'<p class="lbl">' + T(lang, "nolink").split("—")[0].strip() + seemore("open") + '</p><ul class="rows">'
            + "".join(openrow(r) for r in open_pairs) + '</ul>' if open_pairs else ''}
           {'<p class="lbl">' + T(lang, "shared") + seemore("shared") + '</p><ul class="rows">'
            + "".join(pathrow(r) for r in shared) + '</ul>' if shared else ''}
-          <p class="lbl">{T(lang, "toppath")}{seemore("top")}</p>
-          <ul class="rows">{"".join(pathrow(r) for r in top) or empty}</ul>
-          <p class="lbl">{T(lang, "livepairs")}{seemore("recent")}</p>
-          <ul class="rows">{"".join(liverow(r) for r in live_pairs) or empty}</ul>
           <p class="lbl">{T(lang, "livewords")}</p>
           <div class="tags">{"".join(
               f'<a href="{url_for("word", w=r["a"], lang=lang)}">{html.escape(r["a"])}</a>'
               for r in live_words) or f'<span class="note">{T(lang, "empty")}</span>'}</div>
+          <p class="lbl">{T(lang, "toppath")}{seemore("top")}</p>
+          <ul class="rows">{"".join(pathrow(r) for r in top) or empty}</ul>
         </section>
       </div>
       <script>{SWAP_JS}</script>"""
